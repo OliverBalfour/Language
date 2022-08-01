@@ -465,7 +465,7 @@ impl<'a> Parser<'a> {
     }
     // expr ::= { stmt } | if (binary_expr) expr | if (binary_expr) expr else expr | while (binary_expr) expr
     // | fn identifier ( ( identifier (, identifier)* )? ) { stmt }
-    // | print expr | return expr | var identifier = expr | identifier = expr | identifier(expr (, expr)*) | binary_expr
+    // | print expr | return expr | var identifier = expr | identifier = expr | binary_expr
     fn expr(&mut self) -> Result<Expr, BaseError> {
         if self.peek() == Some(TokenType::LeftCurly) {
             // { stmt }
@@ -542,7 +542,7 @@ impl<'a> Parser<'a> {
                 Err(BaseError::Syntax(String::from("Missing identifier after 'var'")))
             }
         } else {
-            // identifier = expr | identifier(expr (, expr)*) | binary_expr
+            // identifier = expr | binary_expr
             let val = self.binary_expr()?;
             match val {
                 Expr::Var(name) => {
@@ -551,19 +551,6 @@ impl<'a> Parser<'a> {
                         self.consume();
                         let expr = Rc::new(self.expr()?);
                         Ok(Expr::VarAssign(name, expr))
-                    } else if self.peek() == Some(TokenType::LeftParen) {
-                        // identifier(expr (, expr)*)
-                        self.consume();
-                        let mut args = Vec::new();
-                        while self.peek() != Some(TokenType::RightParen) {
-                            args.push(Box::new(self.expr()?));
-                            if self.peek() != Some(TokenType::Comma) {
-                                break;
-                            }
-                            self.consume();
-                        }
-                        self.consume_type(TokenType::RightParen, "Missing ) after function arguments")?;
-                        Ok(Expr::FnCall { name, args })
                     } else {
                         Ok(Expr::Var(name))
                     }
@@ -579,7 +566,7 @@ impl<'a> Parser<'a> {
     }
     fn binary_expr_impl(&mut self, prec: u8) -> Result<Expr, BaseError> {
         // generic parser for infix binary left-associative operators
-        let mut x = self.unary()?;
+        let mut x = self.call()?;
         loop {
             let op = self.peek().unwrap();
             if op.fixity() < prec {
@@ -593,6 +580,29 @@ impl<'a> Parser<'a> {
                 right: Box::new(y),
             }
         }
+    }
+    // call ::= identifier(expr (, expr)*) | unary
+    fn call(&mut self) -> Result<Expr, BaseError> {
+        // identifier(expr (, expr)*)
+        if let Some(TokenType::Identifier(name)) = self.peek() {
+            self.consume();
+            if self.peek() == Some(TokenType::LeftParen) {
+                self.consume();
+                let mut args = Vec::new();
+                while self.peek() != Some(TokenType::RightParen) {
+                    args.push(Box::new(self.expr()?));
+                    if self.peek() != Some(TokenType::Comma) {
+                        break;
+                    }
+                    self.consume();
+                }
+                self.consume_type(TokenType::RightParen, "Missing ) after function arguments")?;
+                return Ok(Expr::FnCall { name, args })
+            }
+            self._pos -= 1 // undo consume
+        }
+        // unary
+        self.unary()
     }
     // unary ::= ( "!" | "-" ) unary | primary
     fn unary(&mut self) -> Result<Expr, BaseError> {
@@ -672,9 +682,12 @@ impl Interpreter {
                 match env.borrow().get(&name) {
                     Some(f) => match f.as_ref() {
                         Expr::Fn { args: param_names, body } => {
+                            if param_names.len() != args.len() {
+                                return Err(BaseError::Syntax(format!("Function {} expects {} arguments", name, param_names.len())));
+                            }
                             let scope = Rc::new(RefCell::new(Environment::new_with_parent(env.clone())));
                             for (name, arg) in param_names.iter().zip(args.iter()) {
-                                scope.borrow_mut().define(name.clone(), Rc::new(*arg.clone()));
+                                scope.borrow_mut().define(name.clone(), Rc::new(self.interpret(*arg.clone(), env.clone())?));
                             }
                             // TODO: this does a lot of cloning
                             self.interpret(*body.clone(), scope)
@@ -815,6 +828,7 @@ fn execute(source: String) {
         println!("{}\n", e.to_string())
     }
     let parser = Parser::new(stream);
+    // dbg!(parser.stream.tokens);
     match parser.root {
         Ok(tree) => {
             // println!("{}", tree.to_string());
