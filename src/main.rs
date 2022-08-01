@@ -276,6 +276,7 @@ impl<'a> TokenStream<'a> {
 #[derive(Debug, PartialEq, Clone)]
 enum Expr {
     VarDecl(Rc<String>, Rc<Expr>),
+    VarAssign(String, Rc<Expr>),
     Var(String),
     Block(Box<Expr>),
     IfThenElse { cond: Box<Expr>, if_true: Box<Expr>, if_false: Box<Expr> },
@@ -291,7 +292,8 @@ enum Expr {
 impl ToString for Expr {
     fn to_string(&self) -> String {
         match self {
-            Expr::VarDecl(name, expr) => format!("var {} = {};", name, expr.to_string()),
+            Expr::VarDecl(name, expr) => format!("var {} = {}", name, expr.to_string()),
+            Expr::VarAssign(name, expr) => format!("{} = {}", name, expr.to_string()),
             Expr::Var(name) => name.clone(),
             Expr::Block(expr) => format!("{{ {} }}", expr.to_string()),
             Expr::IfThenElse { cond, if_true, if_false } => match **if_false {
@@ -332,8 +334,19 @@ impl Environment {
         self.symbols.get(name).cloned()
             .or_else(|| self.parent.as_ref().and_then(|p| p.borrow().get(name)))
     }
-    fn set(&mut self, name: Rc<String>, expr: Rc<Expr>) {
+    // define a new variable in the current environment, shadowing any in parent ones
+    fn define(&mut self, name: Rc<String>, expr: Rc<Expr>) {
         self.symbols.insert(name, expr);
+    }
+    // set/update an existing variable, choosing the most recent definition
+    fn set(&mut self, name: Rc<String>, expr: Rc<Expr>) {
+        if self.symbols.contains_key(&name) {
+            self.symbols.insert(name, expr);
+        } else {
+            if let Some(parent) = &self.parent {
+                parent.borrow_mut().set(name, expr);
+            }
+        }
     }
 }
 
@@ -353,7 +366,7 @@ impl<'a> Parser<'a> {
         // parse root as statement
         p.root = p.stmt();
         if p.peek() != Some(TokenType::EOF) {
-            println!("Unexpected tokens")
+            println!("Unexpected tokens: {}", p.peek().unwrap().to_string())
         }
         p
     }
@@ -386,7 +399,7 @@ impl<'a> Parser<'a> {
         };
         Ok(expr)
     }
-    // expr ::= { stmt } | if (equality) expr | if (equality) expr else expr | while (equality) expr | print expr | var identifier = expr | equality
+    // expr ::= { stmt } | if (equality) expr | if (equality) expr else expr | while (equality) expr | print expr | var identifier = expr | identifier = expr | equality
     fn expr(&mut self) -> Result<Expr, BaseError> {
         if self.peek() == Some(TokenType::LeftCurly) {
             // { stmt }
@@ -435,7 +448,20 @@ impl<'a> Parser<'a> {
             }
         } else {
             // equality
-            self.equality()
+            let val = self.equality()?;
+            match val {
+                Expr::Var(name) => {
+                    // identifier = expr
+                    if self.peek() == Some(TokenType::Equal) {
+                        self.consume();
+                        let expr = Rc::new(self.expr()?);
+                        Ok(Expr::VarAssign(name, expr))
+                    } else {
+                        Ok(Expr::Var(name))
+                    }
+                },
+                _ => return Ok(val),
+            }
         }
     }
     // equality ::= comparison ( (!= | ==) comparison )*
@@ -549,7 +575,13 @@ impl Interpreter {
             Expr::VarDecl(name, expr) => {
                 // TODO: this does a lot of cloning
                 let value = self.interpret((*expr).clone(), env.clone())?;
-                env.borrow_mut().set(name, Rc::new(value.clone()));
+                env.borrow_mut().define(name, Rc::new(value.clone()));
+                Ok(value)
+            },
+            Expr::VarAssign(name, expr) => {
+                let value = self.interpret((*expr).clone(), env.clone())?;
+                // TODO: remove Rc<String>
+                env.borrow_mut().set(Rc::new(name), Rc::new(value.clone()));
                 Ok(value)
             },
             Expr::Var(name) => {
@@ -651,7 +683,7 @@ impl Interpreter {
     }
 }
 
-fn main() {
+fn repl() {
     let stdin = io::stdin();
     for _line in stdin.lock().lines() {
         let line = _line.unwrap();
@@ -673,5 +705,37 @@ fn main() {
             },
             Err(e) => println!("{}\n", e.to_string())
         }
+    }
+}
+
+fn execute(source: String) {
+    let stream = TokenStream::new(&source);
+    if let Some(e) = stream.err.clone() {
+        println!("{}\n", e.to_string())
+    }
+    let parser = Parser::new(stream);
+    match parser.root {
+        Ok(tree) => {
+            let mut interpreter = Interpreter::new();
+            match interpreter.interpret_program(tree) {
+                Ok(normalized) => println!("{}\n", normalized.to_string()),
+                Err(e) => println!("{}\n", e.to_string())
+            }
+        },
+        Err(e) => println!("{}\n", e.to_string())
+    }
+}
+
+fn main() {
+    let fname = std::env::args().nth(1);
+    match fname {
+        Some(file) => {
+            let contents = std::fs::read_to_string(file.clone());
+            match contents {
+                Ok(contents) => execute(contents),
+                Err(_) => println!("Could not find file {}", file)
+            }
+        },
+        None => repl()
     }
 }
