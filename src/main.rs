@@ -54,6 +54,14 @@ impl ToString for TokenType {
             Self::GreaterEqual => String::from(">="),
             Self::Less => String::from("<"),
             Self::LessEqual => String::from("<="),
+            Self::Natural(n) => format!("{}", n),
+            Self::If => String::from("if"),
+            Self::Else => String::from("else"),
+            Self::True => String::from("true"),
+            Self::False => String::from("false"),
+            Self::While => String::from("while"),
+            Self::Return => String::from("return"),
+            Self::Identifier => panic!("help!"),
             _ => String::from(""),
         }
     }
@@ -71,19 +79,23 @@ struct Token<'a> {
 struct TokenStream<'a> {
     source: &'a str,
     tokens: Vec<Token<'a>>,
+    err: Option<BaseError>,
 
     _pos: usize,  // pos in source we're up to in tokenizer
     _token: usize,  // start pos of current token
 }
 
+#[derive(Debug, Clone)]
 enum BaseError {
+    Unknown,
     Syntax(String),
 }
 
-impl BaseError {
-    fn print(&self) {
+impl ToString for BaseError {
+    fn to_string(&self) -> String {
         match self {
-            BaseError::Syntax(x) => println!("SyntaxError: {}", x),
+            BaseError::Unknown => String::from("UnknownError"),
+            BaseError::Syntax(x) => String::from(format!("SyntaxError: {}", x)),
         }
     }
 }
@@ -95,6 +107,7 @@ impl<'a> TokenStream<'a> {
             tokens: Vec::with_capacity(source.len() / 10),
             _pos: 0,
             _token: 0,
+            err: None,
         };
         stream.tokenize();
         stream
@@ -115,7 +128,7 @@ impl<'a> TokenStream<'a> {
         }
         if self._pos < self.source.len() {
             let snippet = &self.source[self._pos..std::cmp::min(self._pos+10, self.source.len())];
-            BaseError::Syntax(format!("Unexpected characters: {}", snippet)).print()
+            self.err = Some(BaseError::Syntax(format!("Unexpected characters: {}", snippet)))
         }
     }
     fn peek(&self) -> Option<char> {
@@ -237,7 +250,7 @@ impl ToString for Expr {
 
 struct Parser<'a> {
     stream: TokenStream<'a>,
-    root: Option<Expr>,
+    root: Result<Expr, BaseError>,
     _pos: usize,
 }
 
@@ -245,7 +258,7 @@ impl<'a> Parser<'a> {
     fn new(stream: TokenStream<'a>) -> Self {
         let mut p = Self {
             stream,
-            root: None,
+            root: Err(BaseError::Unknown),
             _pos: 0,
         };
         // parse root as expression
@@ -261,11 +274,11 @@ impl<'a> Parser<'a> {
         t
     }
     // expr ::= equality
-    fn expr(&mut self) -> Option<Expr> {
+    fn expr(&mut self) -> Result<Expr, BaseError> {
         self.equality()
     }
     // equality ::= comparison ( (!= | ==) comparison )*
-    fn equality(&mut self) -> Option<Expr> {
+    fn equality(&mut self) -> Result<Expr, BaseError> {
         let mut expr = self.comparison()?;
         while self.peek() == Some(TokenType::NotEqual) || self.peek() == Some(TokenType::EqualEqual) {
             let op = self.consume().unwrap();
@@ -275,10 +288,10 @@ impl<'a> Parser<'a> {
                 op, right,
             }
         };
-        Some(expr)
+        Ok(expr)
     }
     // comparison ::= term ( (> | >= | < | <=) term )*
-    fn comparison(&mut self) -> Option<Expr> {
+    fn comparison(&mut self) -> Result<Expr, BaseError> {
         let mut expr = self.term()?;
         while self.peek() == Some(TokenType::Greater) || self.peek() == Some(TokenType::GreaterEqual)
            || self.peek() == Some(TokenType::Less) || self.peek() == Some(TokenType::LessEqual) {
@@ -289,10 +302,10 @@ impl<'a> Parser<'a> {
                 op, right,
             }
         };
-        Some(expr)
+        Ok(expr)
     }
     // term ::= factor ( (- | +) factor )*
-    fn term(&mut self) -> Option<Expr> {
+    fn term(&mut self) -> Result<Expr, BaseError> {
         let mut expr = self.factor()?;
         while self.peek() == Some(TokenType::Minus) || self.peek() == Some(TokenType::Plus) {
             let op = self.consume().unwrap();
@@ -302,10 +315,10 @@ impl<'a> Parser<'a> {
                 op, right,
             }
         };
-        Some(expr)
+        Ok(expr)
     }
     // factor ::= unary ( ( / | * ) unary )*
-    fn factor(&mut self) -> Option<Expr> {
+    fn factor(&mut self) -> Result<Expr, BaseError> {
         let mut expr = self.unary()?;
         while self.peek() == Some(TokenType::ForwardSlash) || self.peek() == Some(TokenType::Asterisk) {
             let op = self.consume().unwrap();
@@ -315,35 +328,41 @@ impl<'a> Parser<'a> {
                 op, right,
             }
         };
-        Some(expr)
+        Ok(expr)
     }
     // unary ::= ( "!" | "-" ) unary | primary
-    fn unary(&mut self) -> Option<Expr> {
+    fn unary(&mut self) -> Result<Expr, BaseError> {
         if self.peek() == Some(TokenType::Not) || self.peek() == Some(TokenType::Minus) {
             // recursive case
             let op = self.consume().unwrap();
             let expr = Box::new(self.unary()?);
-            Some(Expr::PrefixUnary { op, expr })
+            Ok(Expr::PrefixUnary { op, expr })
         } else {
             // base case
             self.primary()
         }
     }
     // primary ::= NUMBER | STRING | true | false | "(" expr ")"
-    fn primary(&mut self) -> Option<Expr> {
-        match self.consume()? {
-            TokenType::Natural(n) => Some(Expr::Natural(n)),
-            // TokenType::String(s) => Some(Expr::String(s)),
-            TokenType::True => Some(Expr::Bool(true)),
-            TokenType::False => Some(Expr::Bool(false)),
-            TokenType::Identifier => panic!("help!"),
-            TokenType::LeftParen => {
+    fn primary(&mut self) -> Result<Expr, BaseError> {
+        match self.consume() {
+            Some(TokenType::Natural(n)) => Ok(Expr::Natural(n)),
+            // Some(TokenType::String(s)) => Ok(Expr::String(s)),
+            Some(TokenType::True) => Ok(Expr::Bool(true)),
+            Some(TokenType::False) => Ok(Expr::Bool(false)),
+            Some(TokenType::Identifier) => panic!("help!"),
+            Some(TokenType::LeftParen) => {
                 let expr = self.expr()?;
-                if self.consume() == Some(TokenType::RightParen) {
-                    Some(expr)
-                } else { None }
+                match self.peek() {
+                    Some(TokenType::RightParen) => {
+                        self.consume();
+                        Ok(expr)
+                    },
+                    Some(tok) => Err(BaseError::Syntax(format!("Unexpected token: {}", tok.to_string()))),
+                    None => Err(BaseError::Unknown),
+                }
             },
-            _ => None,
+            Some(tok) => Err(BaseError::Syntax(format!("Unexpected token: {}", tok.to_string()))),
+            _ => Err(BaseError::Unknown),
         }
     }
 }
@@ -353,9 +372,15 @@ fn main() {
     for _line in stdin.lock().lines() {
         let line = _line.unwrap();
         let stream = TokenStream::new(&line);
+        if let Some(e) = stream.err.clone() {
+            println!("{}\n", e.to_string())
+        }
         let parser = Parser::new(stream);
         // dbg!(parser.stream.tokens);
         // dbg!(parser.root);
-        println!("{}", parser.root.unwrap().to_string());
+        match parser.root {
+            Ok(tree) => println!("{}\n", tree.to_string()),
+            Err(e) => println!("{}\n", e.to_string())
+        }
     }
 }
