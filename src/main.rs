@@ -305,7 +305,7 @@ impl<'a> TokenStream<'a> {
 
 #[derive(Debug, PartialEq, Clone)]
 enum Expr {
-    Fn { args: Vec<String>, body: Box<Expr> },
+    Fn { args: Vec<String>, body: Rc<Expr> },
     FnCall { name: String, args: Vec<Box<Expr>> },
     VarDecl(String, Rc<Expr>),
     VarAssign(String, Rc<Expr>),
@@ -521,7 +521,7 @@ impl<'a> Parser<'a> {
                 self.consume_type(TokenType::RightCurly, "Missing } after function body")?;
                 Ok(Expr::VarDecl(
                     name,
-                    Rc::new(Expr::Fn { args, body: Box::new(body) })
+                    Rc::new(Expr::Fn { args, body: Rc::new(body) })
                 ))
             } else {
                 Err(BaseError::Syntax("Missing function name".to_string()))
@@ -654,27 +654,25 @@ impl Interpreter {
             global: Rc::new(RefCell::new(Environment::new())),
         }
     }
-    fn interpret_program(&mut self, program: Expr) -> Result<Expr, BaseError> {
+    fn interpret_program(&mut self, program: &Expr) -> Result<Rc<Expr>, BaseError> {
         self.interpret(program, self.global.clone())
     }
-    fn interpret(&self, program: Expr, env: Rc<RefCell<Environment>>) -> Result<Expr, BaseError> {
+    fn interpret(&self, program: &Expr, env: Rc<RefCell<Environment>>) -> Result<Rc<Expr>, BaseError> {
         match program {
             Expr::VarDecl(name, expr) => {
-                // TODO: this does a lot of cloning
-                let value = self.interpret((*expr).clone(), env.clone())?;
-                env.borrow_mut().define(name, Rc::new(value.clone()));
+                let value = self.interpret(expr, env.clone())?;
+                env.borrow_mut().define(name.clone(), value.clone());
                 Ok(value)
             },
             Expr::VarAssign(name, expr) => {
-                let value = self.interpret((*expr).clone(), env.clone())?;
-                env.borrow_mut().set(name, Rc::new(value.clone()));
+                let value = self.interpret(expr, env.clone())?;
+                env.borrow_mut().set(name.clone(), value.clone());
                 Ok(value)
             },
             Expr::Var(name) => {
-                // TODO: this does a lot of cloning
                 let value = env.borrow().get(&name);
                 match value {
-                    Some(value) => Ok((*value).clone()),
+                    Some(value) => Ok(value),
                     None => Err(BaseError::Name(format!("Undefined variable {}", name))),
                 }
             },
@@ -687,10 +685,9 @@ impl Interpreter {
                             }
                             let scope = Rc::new(RefCell::new(Environment::new_with_parent(env.clone())));
                             for (name, arg) in param_names.iter().zip(args.iter()) {
-                                scope.borrow_mut().define(name.clone(), Rc::new(self.interpret(*arg.clone(), env.clone())?));
+                                scope.borrow_mut().define(name.clone(), self.interpret(arg, env.clone())?);
                             }
-                            // TODO: this does a lot of cloning
-                            self.interpret(*body.clone(), scope)
+                            self.interpret(body, scope)
                         },
                         _ => Err(BaseError::Syntax(format!("Expected function, found {}", f.to_string()))),
                     },
@@ -699,96 +696,96 @@ impl Interpreter {
             },
             Expr::Block(expr) => {
                 let scope = Rc::new(RefCell::new(Environment::new_with_parent(env.clone())));
-                Ok(self.interpret(*expr, scope)?)
+                Ok(self.interpret(expr, scope)?)
             },
             Expr::IfThenElse { cond, if_true, if_false } => {
-                let b = self.interpret(*cond, env.clone())?;
-                if self.cast_bool(b, env.clone())? {
-                    self.interpret(*if_true, env)
+                let b = self.interpret(cond, env.clone())?;
+                if self.cast_bool(b.as_ref(), env.clone())? {
+                    self.interpret(if_true, env)
                 } else {
-                    self.interpret(*if_false, env)
+                    self.interpret(if_false, env)
                 }
             },
             Expr::While { cond, body } => {
-                while self.cast_bool(self.interpret(*cond.clone(), env.clone())?, env.clone())? {
-                    self.interpret(*body.clone(), env.clone())?;
+                while self.cast_bool(self.interpret(cond, env.clone())?.as_ref(), env.clone())? {
+                    self.interpret(body, env.clone())?;
                 }
-                Ok(Expr::Unit)
+                Ok(Rc::new(Expr::Unit))  // TODO: make singleton unit
             },
             Expr::PrefixUnary { op, expr } => {
-                let v = self.interpret(*expr, env)?;
-                match (op, v) {
-                    (TokenType::Print, Expr::Integer(n)) => { println!("{}", n); Ok(Expr::Unit) },
-                    (TokenType::Print, Expr::String(s)) => { println!("{}", s); Ok(Expr::Unit) },
-                    (TokenType::Print, Expr::Bool(b)) => { println!("{}", b); Ok(Expr::Unit) },
-                    (TokenType::Print, Expr::Unit) => { println!("{}", Expr::Unit.to_string()); Ok(Expr::Unit) },
+                let v = self.interpret(expr, env)?;
+                match (op, v.as_ref()) {
+                    (TokenType::Print, Expr::Integer(n)) => { println!("{}", n); Ok(Rc::new(Expr::Unit)) },  // TODO: make singleton unit
+                    (TokenType::Print, Expr::String(s)) => { println!("{}", s); Ok(Rc::new(Expr::Unit)) },
+                    (TokenType::Print, Expr::Bool(b)) => { println!("{}", b); Ok(Rc::new(Expr::Unit)) },
+                    (TokenType::Print, Expr::Unit) => { println!("{}", Expr::Unit.to_string()); Ok(Rc::new(Expr::Unit)) },
                     (TokenType::Print, v) => Err(BaseError::Syntax(format!("Cannot print unexpected value: {}", v.to_string()))),
 
                     // exit the function early with the value
-                    (TokenType::Return, v) => Ok(v),
+                    (TokenType::Return, v) => Ok(Rc::new(v.clone())),  // TODO
 
-                    (TokenType::Not, Expr::Bool(b)) => Ok(Expr::Bool(!b)),
+                    (TokenType::Not, Expr::Bool(b)) => Ok(Rc::new(Expr::Bool(!b))),
                     (TokenType::Not, v) => Err(BaseError::Type(format!("Cannot use boolean negation on {}", v.to_string()))),
 
-                    (TokenType::Minus, Expr::Integer(n)) => Ok(Expr::Integer(-n)),
+                    (TokenType::Minus, Expr::Integer(n)) => Ok(Rc::new(Expr::Integer(-n))),
                     (TokenType::Minus, v) => Err(BaseError::Type(format!("Cannot negate {}", v.to_string()))),
 
                     _ => Err(BaseError::Unknown)
                 }
             },
             Expr::InfixBinary { left, op, right } => {
-                let l = self.interpret(*left, env.clone())?;
-                let r = self.interpret(*right, env)?;
-                match (l, op, r) {
-                    (_, TokenType::Semicolon, r) => Ok(r),
+                let l = self.interpret(left, env.clone())?;
+                let r = self.interpret(right, env)?;
+                match (l.as_ref(), op, r.as_ref()) {
+                    (_, TokenType::Semicolon, r) => Ok(Rc::new(r.clone())),
 
-                    (Expr::Integer(x), TokenType::Plus, Expr::Integer(y)) => Ok(Expr::Integer(x + y)),
-                    (Expr::String(x), TokenType::Plus, Expr::String(y)) => Ok(Expr::String(Rc::new(format!("{}{}", x, y)))),
+                    (Expr::Integer(x), TokenType::Plus, Expr::Integer(y)) => Ok(Rc::new(Expr::Integer(x + y))),
+                    (Expr::String(x), TokenType::Plus, Expr::String(y)) => Ok(Rc::new(Expr::String(Rc::new(format!("{}{}", x, y))))),
                     (l, TokenType::Plus, r) => Err(BaseError::Type(format!("Cannot add {} and {}", l.to_string(), r.to_string()))),
 
-                    (Expr::Integer(x), TokenType::Minus, Expr::Integer(y)) => Ok(Expr::Integer(x - y)),
+                    (Expr::Integer(x), TokenType::Minus, Expr::Integer(y)) => Ok(Rc::new(Expr::Integer(x - y))),
                     (l, TokenType::Minus, r) => Err(BaseError::Type(format!("Cannot subtract {} and {}", l.to_string(), r.to_string()))),
 
-                    (Expr::Integer(x), TokenType::Asterisk, Expr::Integer(y)) => Ok(Expr::Integer(x * y)),
+                    (Expr::Integer(x), TokenType::Asterisk, Expr::Integer(y)) => Ok(Rc::new(Expr::Integer(x * y))),
                     (l, TokenType::Asterisk, r) => Err(BaseError::Type(format!("Cannot multiple {} and {}", l.to_string(), r.to_string()))),
 
-                    (Expr::Integer(x), TokenType::ForwardSlash, Expr::Integer(y)) => Ok(Expr::Integer(x / y)),
+                    (Expr::Integer(x), TokenType::ForwardSlash, Expr::Integer(y)) => Ok(Rc::new(Expr::Integer(x / y))),
                     (l, TokenType::ForwardSlash, r) => Err(BaseError::Type(format!("Cannot divide {} and {}", l.to_string(), r.to_string()))),
 
                     (_, TokenType::Comma, _) => Err(BaseError::NotImplemented),
                     (l, TokenType::Equal, r) => Err(BaseError::Syntax(format!("Equality operator used in invalid context: {} = {}", l.to_string(), r.to_string()))),
 
-                    (x, TokenType::EqualEqual, y) => Ok(Expr::Bool(x == y)),
-                    (x, TokenType::NotEqual, y) => Ok(Expr::Bool(x != y)),
+                    (x, TokenType::EqualEqual, y) => Ok(Rc::new(Expr::Bool(x == y))),
+                    (x, TokenType::NotEqual, y) => Ok(Rc::new(Expr::Bool(x != y))),
 
-                    (Expr::Integer(x), TokenType::Greater, Expr::Integer(y)) => Ok(Expr::Bool(x > y)),
+                    (Expr::Integer(x), TokenType::Greater, Expr::Integer(y)) => Ok(Rc::new(Expr::Bool(x > y))),
                     (l, TokenType::Greater, r) => Err(BaseError::Type(format!("Cannot compare {} and {}", l.to_string(), r.to_string()))),
 
-                    (Expr::Integer(x), TokenType::GreaterEqual, Expr::Integer(y)) => Ok(Expr::Bool(x >= y)),
+                    (Expr::Integer(x), TokenType::GreaterEqual, Expr::Integer(y)) => Ok(Rc::new(Expr::Bool(x >= y))),
                     (l, TokenType::GreaterEqual, r) => Err(BaseError::Type(format!("Cannot compare {} and {}", l.to_string(), r.to_string()))),
 
-                    (Expr::Integer(x), TokenType::Less, Expr::Integer(y)) => Ok(Expr::Bool(x < y)),
+                    (Expr::Integer(x), TokenType::Less, Expr::Integer(y)) => Ok(Rc::new(Expr::Bool(x < y))),
                     (l, TokenType::Less, r) => Err(BaseError::Type(format!("Cannot compare {} and {}", l.to_string(), r.to_string()))),
 
-                    (Expr::Integer(x), TokenType::LessEqual, Expr::Integer(y)) => Ok(Expr::Bool(x <= y)),
+                    (Expr::Integer(x), TokenType::LessEqual, Expr::Integer(y)) => Ok(Rc::new(Expr::Bool(x <= y))),
                     (l, TokenType::LessEqual, r) => Err(BaseError::Type(format!("Cannot compare {} and {}", l.to_string(), r.to_string()))),
 
-                    (Expr::Bool(x), TokenType::And, Expr::Bool(y)) => Ok(Expr::Bool(x && y)),
+                    (Expr::Bool(x), TokenType::And, Expr::Bool(y)) => Ok(Rc::new(Expr::Bool(*x && *y))),
                     (l, TokenType::And, r) => Err(BaseError::Type(format!("Cannot use logical and on {} and {}", l.to_string(), r.to_string()))),
 
-                    (Expr::Bool(x), TokenType::Or, Expr::Bool(y)) => Ok(Expr::Bool(x || y)),
+                    (Expr::Bool(x), TokenType::Or, Expr::Bool(y)) => Ok(Rc::new(Expr::Bool(*x || *y))),
                     (l, TokenType::Or, r) => Err(BaseError::Type(format!("Cannot use logical or on {} and {}", l.to_string(), r.to_string()))),
 
                     _ => Err(BaseError::Unknown)
                 }
             }
             // literals
-            x => Ok(x),
+            x => Ok(Rc::new(x.clone())),
         }
     }
-    fn cast_bool(&self, expr: Expr, env: Rc<RefCell<Environment>>) -> Result<bool, BaseError> {
+    fn cast_bool(&self, expr: &Expr, env: Rc<RefCell<Environment>>) -> Result<bool, BaseError> {
         let v = self.interpret(expr, env)?;
-        match v {
+        match v.as_ref() {
             Expr::Bool(false) => Ok(false),
             Expr::Integer(0) => Ok(false),
             Expr::String(s) => Ok(s.len() > 0),
@@ -812,7 +809,7 @@ fn repl() {
             Ok(tree) => {
                 // println!("{}", tree.to_string());
                 let mut interpreter = Interpreter::new();
-                match interpreter.interpret_program(tree) {
+                match interpreter.interpret_program(&tree) {
                     Ok(normalized) => println!("{}\n", normalized.to_string()),
                     Err(e) => println!("{}\n", e.to_string())
                 }
@@ -834,7 +831,7 @@ fn execute(source: String) {
             // println!("{}", tree.to_string());
             // dbg!(tree.clone());
             let mut interpreter = Interpreter::new();
-            match interpreter.interpret_program(tree) {
+            match interpreter.interpret_program(&tree) {
                 Ok(normalized) => println!("{}\n", normalized.to_string()),
                 Err(e) => println!("{}\n", e.to_string())
             }
