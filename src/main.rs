@@ -3,6 +3,8 @@
 
 use std::io::{self, BufRead};
 use std::rc::Rc;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 #[derive(Debug, PartialEq, Clone)]
 enum TokenType {
@@ -271,7 +273,6 @@ impl<'a> TokenStream<'a> {
 
 #[derive(Debug, PartialEq, Clone)]
 enum Expr {
-    // TODO: we kind of don't want variable declarations to be expressions, we want them to add to a symbol table
     VarDecl(Rc<String>, Rc<Expr>),
     IfThenElse { cond: Box<Expr>, if_true: Box<Expr>, if_false: Box<Expr> },
     While { cond: Box<Expr>, body: Box<Expr> },
@@ -299,6 +300,28 @@ impl ToString for Expr {
             Expr::Bool(b) => b.to_string(),
             Expr::Unit => String::from(""),
         }
+    }
+}
+
+// Variable declarations in a lexical scope
+struct Environment {
+    symbols: HashMap<Rc<String>, Rc<Expr>>,
+    parent: Option<Rc<RefCell<Environment>>>,
+}
+
+impl Environment {
+    fn new() -> Self {
+        Environment {
+            symbols: HashMap::new(),
+            parent: None,
+        }
+    }
+    fn get(&self, name: &String) -> Option<Rc<Expr>> {
+        self.symbols.get(name).cloned()
+            .or_else(|| self.parent.as_ref().and_then(|p| p.borrow().get(name)))
+    }
+    fn set(&mut self, name: Rc<String>, expr: Rc<Expr>) {
+        self.symbols.insert(name, expr);
     }
 }
 
@@ -493,27 +516,37 @@ impl<'a> Parser<'a> {
     }
 }
 
-struct Interpreter {}
+struct Interpreter {
+    global: Rc<RefCell<Environment>>,
+}
 
 impl Interpreter {
-    fn interpret(&self, program: Expr) -> Result<Expr, BaseError> {
+    fn new() -> Self {
+        Self {
+            global: Rc::new(RefCell::new(Environment::new())),
+        }
+    }
+    fn interpret_program(&mut self, program: Expr) -> Result<Expr, BaseError> {
+        self.interpret(program, self.global.clone())
+    }
+    fn interpret(&self, program: Expr, env: Rc<RefCell<Environment>>) -> Result<Expr, BaseError> {
         match program {
             Expr::IfThenElse { cond, if_true, if_false } => {
-                let b = self.interpret(*cond)?;
-                if self.cast_bool(b)? {
-                    self.interpret(*if_true)
+                let b = self.interpret(*cond, env.clone())?;
+                if self.cast_bool(b, env.clone())? {
+                    self.interpret(*if_true, env)
                 } else {
-                    self.interpret(*if_false)
+                    self.interpret(*if_false, env)
                 }
             },
             Expr::While { cond, body } => {
-                while self.cast_bool(self.interpret(*cond.clone())?)? {
-                    self.interpret(*body.clone())?;
+                while self.cast_bool(self.interpret(*cond.clone(), env.clone())?, env.clone())? {
+                    self.interpret(*body.clone(), env.clone())?;
                 }
                 Ok(Expr::Unit)
             },
             Expr::PrefixUnary { op, expr } => {
-                let v = self.interpret(*expr)?;
+                let v = self.interpret(*expr, env)?;
                 match (op, v) {
                     (TokenType::Print, Expr::Integer(n)) => { println!("{}", n); Ok(Expr::Unit) },
                     (TokenType::Print, Expr::String(s)) => { println!("{}", s); Ok(Expr::Unit) },
@@ -531,8 +564,8 @@ impl Interpreter {
                 }
             },
             Expr::InfixBinary { left, op, right } => {
-                let l = self.interpret(*left)?;
-                let r = self.interpret(*right)?;
+                let l = self.interpret(*left, env.clone())?;
+                let r = self.interpret(*right, env)?;
                 match (l, op, r) {
                     (_, TokenType::Semicolon, r) => Ok(r),
 
@@ -574,8 +607,8 @@ impl Interpreter {
             x => Ok(x),
         }
     }
-    fn cast_bool(&self, expr: Expr) -> Result<bool, BaseError> {
-        let v = self.interpret(expr)?;
+    fn cast_bool(&self, expr: Expr, env: Rc<RefCell<Environment>>) -> Result<bool, BaseError> {
+        let v = self.interpret(expr, env)?;
         match v {
             Expr::Bool(false) => Ok(false),
             Expr::Integer(0) => Ok(false),
@@ -599,8 +632,8 @@ fn main() {
         match parser.root {
             Ok(tree) => {
                 // println!("{}", tree.to_string());
-                let interpreter = Interpreter {};
-                match interpreter.interpret(tree) {
+                let mut interpreter = Interpreter::new();
+                match interpreter.interpret_program(tree) {
                     Ok(normalized) => println!("{}\n", normalized.to_string()),
                     Err(e) => println!("{}\n", e.to_string())
                 }
