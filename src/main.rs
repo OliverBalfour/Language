@@ -39,6 +39,7 @@ enum TokenType {
 
     Identifier(Rc<String>),
 
+    Comment,
     EOF,
 }
 
@@ -132,10 +133,13 @@ impl<'a> TokenStream<'a> {
             match self.next_token() {
                 Some(token_type) => {
                     let eof = token_type == TokenType::EOF;
-                    self.tokens.push(Token {
-                        lexeme: self.lexeme(),
-                        token: token_type,
-                    });
+                    let skip = token_type == TokenType::Comment;
+                    if !skip {
+                        self.tokens.push(Token {
+                            lexeme: self.lexeme(),
+                            token: token_type,
+                        })
+                    }
                     if eof { break }
                 },
                 None => break
@@ -188,6 +192,11 @@ impl<'a> TokenStream<'a> {
                 "!=" => return Some(TokenType::NotEqual),
                 ">=" => return Some(TokenType::GreaterEqual),
                 "<=" => return Some(TokenType::LessEqual),
+                "//" => {
+                    while self.test(|c| c != '\n') { self.consume(1) }
+                    if self.peek() == Some('\n') { self.consume(1) }
+                    return Some(TokenType::Comment)
+                },
                 _ => self._pos -= 2 // un-consume
             }
         }
