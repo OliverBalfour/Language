@@ -27,6 +27,8 @@ enum TokenType {
     GreaterEqual,
     Less,
     LessEqual,
+    And,
+    Or,
 
     Natural(u64),
     String(Rc<String>),
@@ -67,6 +69,8 @@ impl ToString for TokenType {
             Self::GreaterEqual => String::from(">="),
             Self::Less => String::from("<"),
             Self::LessEqual => String::from("<="),
+            Self::And => String::from("&&"),
+            Self::Or => String::from("||"),
             Self::Natural(n) => format!("{}", n),
             Self::String(s) => format!("\"{}\"", s.clone()),
             Self::If => String::from("if"),
@@ -198,6 +202,8 @@ impl<'a> TokenStream<'a> {
                 "!=" => return Some(TokenType::NotEqual),
                 ">=" => return Some(TokenType::GreaterEqual),
                 "<=" => return Some(TokenType::LessEqual),
+                "&&" => return Some(TokenType::And),
+                "||" => return Some(TokenType::Or),
                 "//" => {
                     while self.test(|c| c != '\n') { self.consume(1) }
                     if self.peek() == Some('\n') { self.consume(1) }
@@ -399,7 +405,7 @@ impl<'a> Parser<'a> {
         };
         Ok(expr)
     }
-    // expr ::= { stmt } | if (equality) expr | if (equality) expr else expr | while (equality) expr | print expr | var identifier = expr | identifier = expr | equality
+    // expr ::= { stmt } | if (operator_top) expr | if (operator_top) expr else expr | while (operator_top) expr | print expr | var identifier = expr | identifier = expr | operator_top
     fn expr(&mut self) -> Result<Expr, BaseError> {
         if self.peek() == Some(TokenType::LeftCurly) {
             // { stmt }
@@ -408,26 +414,26 @@ impl<'a> Parser<'a> {
             self.consume_type(TokenType::RightCurly, "Missing } at end of block")?;
             Ok(Expr::Block(Box::new(s)))
         } else if self.peek() == Some(TokenType::If) {
-            // if (equality) expr | if (equality) expr else expr
+            // if (operator_top) expr | if (operator_top) expr else expr
             self.consume();
             self.consume_type(TokenType::LeftParen, "Missing ( after 'if'")?;
-            let cond = Box::new(self.equality()?);
+            let cond = Box::new(self.operator_top()?);
             self.consume_type(TokenType::RightParen, "Missing ) after 'if' condition")?;
             let if_true = Box::new(self.expr()?);
             let if_false = Box::new(if self.peek() == Some(TokenType::Else) {
-                // if (equality) expr else expr
+                // if (operator_top) expr else expr
                 self.consume();
                 self.expr()?
             } else {
-                // if (equality) expr
+                // if (operator_top) expr
                 Expr::Unit
             });
             Ok(Expr::IfThenElse { cond, if_true, if_false })
         } else if self.peek() == Some(TokenType::While) {
-            // while (equality) expr
+            // while (operator_top) expr
             self.consume();
             self.consume_type(TokenType::LeftParen, "Missing ( after 'while'")?;
-            let cond = Box::new(self.equality()?);
+            let cond = Box::new(self.operator_top()?);
             self.consume_type(TokenType::RightParen, "Missing ) after 'while' condition")?;
             let body = Box::new(self.expr()?);
             Ok(Expr::While { cond, body })
@@ -447,8 +453,8 @@ impl<'a> Parser<'a> {
                 Err(BaseError::Syntax(String::from("Missing identifier after 'var'")))
             }
         } else {
-            // equality
-            let val = self.equality()?;
+            // operator_top
+            let val = self.operator_top()?;
             match val {
                 Expr::Var(name) => {
                     // identifier = expr
@@ -463,6 +469,35 @@ impl<'a> Parser<'a> {
                 _ => return Ok(val),
             }
         }
+    }
+    fn operator_top(&mut self) -> Result<Expr, BaseError> {
+        self.or() // top of the operator fixity grammar chain
+    }
+    // or ::= and ( || and )*
+    fn or(&mut self) -> Result<Expr, BaseError> {
+        let mut expr = self.and()?;
+        while self.peek() == Some(TokenType::Or) {
+            let op = self.consume().unwrap();
+            let right = Box::new(self.and()?);
+            expr = Expr::InfixBinary {
+                left: Box::new(expr),
+                op, right,
+            }
+        };
+        Ok(expr)
+    }
+    // and ::= equality ( || equality )*
+    fn and(&mut self) -> Result<Expr, BaseError> {
+        let mut expr = self.equality()?;
+        while self.peek() == Some(TokenType::And) {
+            let op = self.consume().unwrap();
+            let right = Box::new(self.equality()?);
+            expr = Expr::InfixBinary {
+                left: Box::new(expr),
+                op, right,
+            }
+        };
+        Ok(expr)
     }
     // equality ::= comparison ( (!= | ==) comparison )*
     fn equality(&mut self) -> Result<Expr, BaseError> {
@@ -647,7 +682,7 @@ impl Interpreter {
                     (l, TokenType::ForwardSlash, r) => Err(BaseError::Type(format!("Cannot divide {} and {}", l.to_string(), r.to_string()))),
 
                     (_, TokenType::Comma, _) => Err(BaseError::NotImplemented),
-                    (_, TokenType::Equal, _) => Err(BaseError::NotImplemented),
+                    (l, TokenType::Equal, r) => Err(BaseError::Syntax(format!("Equality operator used in invalid context: {} = {}", l.to_string(), r.to_string()))),
 
                     (x, TokenType::EqualEqual, y) => Ok(Expr::Bool(x == y)),
                     (x, TokenType::NotEqual, y) => Ok(Expr::Bool(x != y)),
@@ -663,6 +698,12 @@ impl Interpreter {
 
                     (Expr::Integer(x), TokenType::LessEqual, Expr::Integer(y)) => Ok(Expr::Bool(x <= y)),
                     (l, TokenType::LessEqual, r) => Err(BaseError::Type(format!("Cannot compare {} and {}", l.to_string(), r.to_string()))),
+
+                    (Expr::Bool(x), TokenType::And, Expr::Bool(y)) => Ok(Expr::Bool(x && y)),
+                    (l, TokenType::And, r) => Err(BaseError::Type(format!("Cannot use logical and on {} and {}", l.to_string(), r.to_string()))),
+
+                    (Expr::Bool(x), TokenType::Or, Expr::Bool(y)) => Ok(Expr::Bool(x || y)),
+                    (l, TokenType::Or, r) => Err(BaseError::Type(format!("Cannot use logical or on {} and {}", l.to_string(), r.to_string()))),
 
                     _ => Err(BaseError::Unknown)
                 }
