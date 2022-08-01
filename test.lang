@@ -1,7 +1,12 @@
 
 var i = 0;
 
+fn foo (a, b) {
+    return "Foo"
+};
+
 while (i < 10) {
     print(i);
+    print foo(0,1);
     i = i + 1
 }

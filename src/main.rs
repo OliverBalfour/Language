@@ -33,6 +33,7 @@ enum TokenType {
     Natural(u64),
     String(Rc<String>),
 
+    Fn,
     If,
     Else,
     While,
@@ -93,6 +94,7 @@ impl ToString for TokenType {
             Self::Or => String::from("||"),
             Self::Natural(n) => format!("{}", n),
             Self::String(s) => format!("\"{}\"", s.clone()),
+            Self::Fn => String::from("fn"),
             Self::If => String::from("if"),
             Self::Else => String::from("else"),
             Self::While => String::from("while"),
@@ -271,7 +273,8 @@ impl<'a> TokenStream<'a> {
         }
 
         // reserved words
-        const RESERVED: [(&str, TokenType); 8] = [
+        const RESERVED: [(&str, TokenType); 9] = [
+            ("fn", TokenType::Fn),
             ("if", TokenType::If),
             ("else", TokenType::Else),
             ("true", TokenType::True),
@@ -302,6 +305,8 @@ impl<'a> TokenStream<'a> {
 
 #[derive(Debug, PartialEq, Clone)]
 enum Expr {
+    Fn { args: Vec<String>, body: Box<Expr> },
+    FnCall { name: String, args: Vec<Box<Expr>> },
     VarDecl(String, Rc<Expr>),
     VarAssign(String, Rc<Expr>),
     Var(String),
@@ -319,7 +324,33 @@ enum Expr {
 impl ToString for Expr {
     fn to_string(&self) -> String {
         match self {
-            Expr::VarDecl(name, expr) => format!("var {} = {}", name, expr.to_string()),
+            Expr::Fn { args: _, body: _ } => panic!("Cannot pretty-print a raw function"),
+            Expr::FnCall { name, args } => {
+                let mut s = String::new();
+                s.push_str(&name);
+                s.push('(');
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 { s.push_str(", "); }
+                    s.push_str(&arg.to_string());
+                }
+                s.push(')');
+                s
+            },
+            Expr::VarDecl(name, expr) => match expr.as_ref() {
+                Expr::Fn { args, body } => {
+                    let mut s = String::new();
+                    s.push_str(&format!("fn {}(", name));
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 { s.push_str(", ") }
+                        s.push_str(arg);
+                    }
+                    s.push_str(") {\n");
+                    s.push_str(&body.to_string());
+                    s.push_str("\n}\n");
+                    s
+                },
+                _ => format!("var {} = {}", name, expr.to_string())
+            },
             Expr::VarAssign(name, expr) => format!("{} = {}", name, expr.to_string()),
             Expr::Var(name) => name.clone(),
             Expr::Block(expr) => format!("{{ {} }}", expr.to_string()),
@@ -329,7 +360,10 @@ impl ToString for Expr {
             },
             Expr::While { cond, body } => format!(" while ({}) {{ {} }} ", cond.to_string(), body.to_string()),
             Expr::PrefixUnary { op, expr } => format!("{}{}", op.to_string(), expr.to_string()),
-            Expr::InfixBinary { left, op, right } => format!("({} {} {})", left.to_string(), op.to_string(), right.to_string()),
+            Expr::InfixBinary { left, op, right } => match op {
+                TokenType::Semicolon => format!("{} {} {}", left.to_string(), op.to_string(), right.to_string()),
+                _ => format!("({} {} {})", left.to_string(), op.to_string(), right.to_string())
+            },
             Expr::Integer(n) => n.to_string(),
             Expr::String(s) => format!("\"{}\"", s),
             Expr::Bool(b) => b.to_string(),
@@ -429,7 +463,9 @@ impl<'a> Parser<'a> {
         };
         Ok(expr)
     }
-    // expr ::= { stmt } | if (binary_expr) expr | if (binary_expr) expr else expr | while (binary_expr) expr | print expr | var identifier = expr | identifier = expr | binary_expr
+    // expr ::= { stmt } | if (binary_expr) expr | if (binary_expr) expr else expr | while (binary_expr) expr
+    // | fn identifier ( ( identifier (, identifier)* )? ) { stmt }
+    // | print expr | return expr | var identifier = expr | identifier = expr | identifier(expr (, expr)*) | binary_expr
     fn expr(&mut self) -> Result<Expr, BaseError> {
         if self.peek() == Some(TokenType::LeftCurly) {
             // { stmt }
@@ -461,8 +497,37 @@ impl<'a> Parser<'a> {
             self.consume_type(TokenType::RightParen, "Missing ) after 'while' condition")?;
             let body = Box::new(self.expr()?);
             Ok(Expr::While { cond, body })
-        } else if self.peek() == Some(TokenType::Print) {
-            // print expr
+        } else if self.peek() == Some(TokenType::Fn) {
+            // fn identifier ( ( identifier (, identifier)* )? ) { stmt }
+            self.consume();
+            if let Some(TokenType::Identifier(name)) = self.consume() {
+                self.consume_type(TokenType::LeftParen, "Missing ( after function name")?;
+                let mut args = Vec::new();
+                loop {
+                    if let Some(TokenType::Identifier(arg)) = self.peek() {
+                        self.consume();
+                        args.push(arg);
+                        if self.peek() != Some(TokenType::Comma) {
+                            break;
+                        }
+                        self.consume();
+                    } else {
+                        break
+                    }
+                }
+                self.consume_type(TokenType::RightParen, "Missing ) after function arguments")?;
+                self.consume_type(TokenType::LeftCurly, "Missing { after arguments")?;
+                let body = self.stmt()?;
+                self.consume_type(TokenType::RightCurly, "Missing } after function body")?;
+                Ok(Expr::VarDecl(
+                    name,
+                    Rc::new(Expr::Fn { args, body: Box::new(body) })
+                ))
+            } else {
+                Err(BaseError::Syntax("Missing function name".to_string()))
+            }
+        } else if self.peek() == Some(TokenType::Print) || self.peek() == Some(TokenType::Return) {
+            // print expr | return expr
             let op = self.consume().unwrap();
             let expr = Box::new(self.expr()?);
             Ok(Expr::PrefixUnary { op, expr })
@@ -477,15 +542,28 @@ impl<'a> Parser<'a> {
                 Err(BaseError::Syntax(String::from("Missing identifier after 'var'")))
             }
         } else {
-            // binary_expr
+            // identifier = expr | identifier(expr (, expr)*) | binary_expr
             let val = self.binary_expr()?;
             match val {
                 Expr::Var(name) => {
-                    // identifier = expr
                     if self.peek() == Some(TokenType::Equal) {
+                        // identifier = expr
                         self.consume();
                         let expr = Rc::new(self.expr()?);
                         Ok(Expr::VarAssign(name, expr))
+                    } else if self.peek() == Some(TokenType::LeftParen) {
+                        // identifier(expr (, expr)*)
+                        self.consume();
+                        let mut args = Vec::new();
+                        while self.peek() != Some(TokenType::RightParen) {
+                            args.push(Box::new(self.expr()?));
+                            if self.peek() != Some(TokenType::Comma) {
+                                break;
+                            }
+                            self.consume();
+                        }
+                        self.consume_type(TokenType::RightParen, "Missing ) after function arguments")?;
+                        Ok(Expr::FnCall { name, args })
                     } else {
                         Ok(Expr::Var(name))
                     }
@@ -494,6 +572,8 @@ impl<'a> Parser<'a> {
             }
         }
     }
+    // handles all of the precedence levels of binary expressions recursively
+    // an example of one level is binary_expr_60 ::= binary_expr_70 ( (+ | -) binary_expr_70 )*
     fn binary_expr(&mut self) -> Result<Expr, BaseError> {
         self.binary_expr_impl(1) // start from precedence 1
     }
@@ -588,6 +668,22 @@ impl Interpreter {
                     None => Err(BaseError::Name(format!("Undefined variable {}", name))),
                 }
             },
+            Expr::FnCall { name, args } => {
+                match env.borrow().get(&name) {
+                    Some(f) => match f.as_ref() {
+                        Expr::Fn { args: param_names, body } => {
+                            let scope = Rc::new(RefCell::new(Environment::new_with_parent(env.clone())));
+                            for (name, arg) in param_names.iter().zip(args.iter()) {
+                                scope.borrow_mut().define(name.clone(), Rc::new(*arg.clone()));
+                            }
+                            // TODO: this does a lot of cloning
+                            self.interpret(*body.clone(), scope)
+                        },
+                        _ => Err(BaseError::Syntax(format!("Expected function, found {}", f.to_string()))),
+                    },
+                    None => Err(BaseError::Name(format!("Undefined function {}", name))),
+                }
+            },
             Expr::Block(expr) => {
                 let scope = Rc::new(RefCell::new(Environment::new_with_parent(env.clone())));
                 Ok(self.interpret(*expr, scope)?)
@@ -614,6 +710,9 @@ impl Interpreter {
                     (TokenType::Print, Expr::Bool(b)) => { println!("{}", b); Ok(Expr::Unit) },
                     (TokenType::Print, Expr::Unit) => { println!("{}", Expr::Unit.to_string()); Ok(Expr::Unit) },
                     (TokenType::Print, v) => Err(BaseError::Syntax(format!("Cannot print unexpected value: {}", v.to_string()))),
+
+                    // exit the function early with the value
+                    (TokenType::Return, v) => Ok(v),
 
                     (TokenType::Not, Expr::Bool(b)) => Ok(Expr::Bool(!b)),
                     (TokenType::Not, v) => Err(BaseError::Type(format!("Cannot use boolean negation on {}", v.to_string()))),
@@ -718,6 +817,8 @@ fn execute(source: String) {
     let parser = Parser::new(stream);
     match parser.root {
         Ok(tree) => {
+            // println!("{}", tree.to_string());
+            // dbg!(tree.clone());
             let mut interpreter = Interpreter::new();
             match interpreter.interpret_program(tree) {
                 Ok(normalized) => println!("{}\n", normalized.to_string()),
