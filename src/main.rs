@@ -36,6 +36,7 @@ enum TokenType {
     False,
     Return,
     Print,
+    Var,
 
     Identifier(Rc<String>),
 
@@ -71,8 +72,9 @@ impl ToString for TokenType {
             Self::While => String::from("while"),
             Self::True => String::from("true"),
             Self::False => String::from("false"),
-            Self::Return => String::from("return"),
+            Self::Return => String::from("return "),
             Self::Print => String::from("print "),
+            Self::Var => String::from("var "),
             Self::Identifier(s) => (s as &String).clone(),
             _ => String::from(""),
         }
@@ -238,7 +240,7 @@ impl<'a> TokenStream<'a> {
         }
 
         // reserved words
-        const RESERVED: [(&str, TokenType); 7] = [
+        const RESERVED: [(&str, TokenType); 8] = [
             ("if", TokenType::If),
             ("else", TokenType::Else),
             ("true", TokenType::True),
@@ -246,6 +248,7 @@ impl<'a> TokenStream<'a> {
             ("while", TokenType::While),
             ("return", TokenType::Return),
             ("print", TokenType::Print),
+            ("var", TokenType::Var),
         ];
         for (lexeme, token) in RESERVED {
             if self.rest().starts_with(lexeme) {
@@ -268,6 +271,8 @@ impl<'a> TokenStream<'a> {
 
 #[derive(Debug, PartialEq, Clone)]
 enum Expr {
+    // TODO: we kind of don't want variable declarations to be expressions, we want them to add to a symbol table
+    VarDecl(Rc<String>, Rc<Expr>),
     IfThenElse { cond: Box<Expr>, if_true: Box<Expr>, if_false: Box<Expr> },
     While { cond: Box<Expr>, body: Box<Expr> },
     PrefixUnary { op: TokenType, expr: Box<Expr> },
@@ -281,6 +286,7 @@ enum Expr {
 impl ToString for Expr {
     fn to_string(&self) -> String {
         match self {
+            Expr::VarDecl(name, expr) => format!("var {} = {};", name, expr.to_string()),
             Expr::IfThenElse { cond, if_true, if_false } => match **if_false {
                 Expr::Unit => format!(" if ({}) {{ {} }} ", cond.to_string(), if_true.to_string()),
                 _ => format!(" if ({}) {{ {} }} else {{ {} }} ", cond.to_string(), if_true.to_string(), if_false.to_string()),
@@ -334,7 +340,7 @@ impl<'a> Parser<'a> {
         };
         Ok(expr)
     }
-    // expr ::= { stmt } | if (equality) expr | if (equality) expr else expr | while (equality) expr | print expr | equality
+    // expr ::= { stmt } | if (equality) expr | if (equality) expr else expr | while (equality) expr | print expr | var identifier = expr | equality
     fn expr(&mut self) -> Result<Expr, BaseError> {
         if self.peek() == Some(TokenType::LeftCurly) {
             // { stmt }
@@ -382,7 +388,19 @@ impl<'a> Parser<'a> {
             let op = self.consume().unwrap();
             let expr = Box::new(self.expr()?);
             Ok(Expr::PrefixUnary { op, expr })
-        }else {
+        } else if self.peek() == Some(TokenType::Var) {
+            // var identifier = expr
+            self.consume();
+            if let Some(TokenType::Identifier(ident)) = self.consume() {
+                if self.consume() != Some(TokenType::Equal) {
+                    return Err(BaseError::Syntax(String::from("Missing equal sign after variable name")))
+                }
+                let expr = Rc::new(self.expr()?);
+                Ok(Expr::VarDecl(ident, expr))
+            } else {
+                Err(BaseError::Syntax(String::from("Missing identifier after 'var'")))
+            }
+        } else {
             // equality
             self.equality()
         }
@@ -452,7 +470,7 @@ impl<'a> Parser<'a> {
             self.primary()
         }
     }
-    // primary ::= NUMBER | STRING | true | false | "(" expr ")"
+    // primary ::= NUMBER | STRING | true | false | IDENTIFIER | "(" expr ")"
     fn primary(&mut self) -> Result<Expr, BaseError> {
         match self.consume() {
             Some(TokenType::Natural(n)) => Ok(Expr::Integer(n as i64)),
