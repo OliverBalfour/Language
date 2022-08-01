@@ -29,9 +29,9 @@ enum TokenType {
 
     If,
     Else,
+    While,
     True,
     False,
-    While,
     Return,
 
     Identifier,
@@ -63,9 +63,9 @@ impl ToString for TokenType {
             Self::Natural(n) => format!("{}", n),
             Self::If => String::from("if"),
             Self::Else => String::from("else"),
+            Self::While => String::from("while"),
             Self::True => String::from("true"),
             Self::False => String::from("false"),
-            Self::While => String::from("while"),
             Self::Return => String::from("return"),
             Self::Identifier => panic!("help!"), // TODO
             _ => String::from(""),
@@ -242,9 +242,10 @@ impl<'a> TokenStream<'a> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 enum Expr {
     IfThenElse { cond: Box<Expr>, if_true: Box<Expr>, if_false: Box<Expr> },
+    While { cond: Box<Expr>, body: Box<Expr> },
     PrefixUnary { op: TokenType, expr: Box<Expr> },
     InfixBinary { left: Box<Expr>, op: TokenType, right: Box<Expr> },
     Integer(i64),
@@ -259,6 +260,7 @@ impl ToString for Expr {
                 Expr::Unit => format!(" if ({}) {{ {} }} ", cond.to_string(), if_true.to_string()),
                 _ => format!(" if ({}) {{ {} }} else {{ {} }} ", cond.to_string(), if_true.to_string(), if_false.to_string()),
             },
+            Expr::While { cond, body } => format!(" while ({}) {{ {} }} ", cond.to_string(), body.to_string()),
             Expr::PrefixUnary { op, expr } => format!("{}{}", op.to_string(), expr.to_string()),
             Expr::InfixBinary { left, op, right } => format!("({} {} {})", left.to_string(), op.to_string(), right.to_string()),
             Expr::Integer(n) => n.to_string(),
@@ -306,7 +308,7 @@ impl<'a> Parser<'a> {
         };
         Ok(expr)
     }
-    // expr ::= { stmt } | if (equality) expr | if (equality) expr else expr | equality
+    // expr ::= { stmt } | if (equality) expr | if (equality) expr else expr | while (equality) expr | equality
     fn expr(&mut self) -> Result<Expr, BaseError> {
         if self.peek() == Some(TokenType::LeftCurly) {
             // { stmt }
@@ -337,6 +339,18 @@ impl<'a> Parser<'a> {
                 Expr::Unit
             });
             Ok(Expr::IfThenElse { cond, if_true, if_false })
+        } else if self.peek() == Some(TokenType::While) {
+            // while (equality) expr
+            self.consume();
+            if self.consume() != Some(TokenType::LeftParen) {
+                return Err(BaseError::Syntax(String::from("Missing left paren after 'if'")))
+            }
+            let cond = Box::new(self.equality()?);
+            if self.consume() != Some(TokenType::RightParen) {
+                return Err(BaseError::Syntax(String::from("Missing right paren after 'if' condition")))
+            }
+            let body = Box::new(self.expr()?);
+            Ok(Expr::While { cond, body })
         } else {
             // equality
             self.equality()
@@ -447,6 +461,12 @@ impl Interpreter {
                 } else {
                     self.interpret(*if_false)
                 }
+            },
+            Expr::While { cond, body } => {
+                while self.cast_bool(self.interpret(*cond.clone())?)? {
+                    self.interpret(*body.clone())?;
+                }
+                Ok(Expr::Unit)
             },
             Expr::PrefixUnary { op, expr } => {
                 let v = self.interpret(*expr)?;
