@@ -48,6 +48,26 @@ enum TokenType {
     EOF,
 }
 
+impl TokenType {
+    fn fixity(&self) -> u8 {
+        match self {
+            TokenType::Asterisk => 70,
+            TokenType::ForwardSlash => 70,
+            TokenType::Plus => 60,
+            TokenType::Minus => 60,
+            TokenType::Greater => 50,
+            TokenType::GreaterEqual => 50,
+            TokenType::Less => 50,
+            TokenType::LessEqual => 50,
+            TokenType::EqualEqual => 40,
+            TokenType::NotEqual => 40,
+            TokenType::And => 30,
+            TokenType::Or => 20,
+            _ => 0,
+        }
+    }
+}
+
 impl ToString for TokenType {
     fn to_string(&self) -> String {
         match self {
@@ -82,6 +102,7 @@ impl ToString for TokenType {
             Self::Print => String::from("print "),
             Self::Var => String::from("var "),
             Self::Identifier(s) => (s as &String).clone(),
+            Self::EOF => String::from(" EOF"),
             _ => String::from(""),
         }
     }
@@ -372,7 +393,10 @@ impl<'a> Parser<'a> {
         // parse root as statement
         p.root = p.stmt();
         if p.peek() != Some(TokenType::EOF) {
-            println!("Unexpected tokens: {}", p.peek().unwrap().to_string())
+            match p.peek() {
+                Some(t) => println!("Unexpected tokens: {}", t.to_string()),
+                None => println!("Unexpected end of file"),
+            }
         }
         p
     }
@@ -405,7 +429,7 @@ impl<'a> Parser<'a> {
         };
         Ok(expr)
     }
-    // expr ::= { stmt } | if (operator_top) expr | if (operator_top) expr else expr | while (operator_top) expr | print expr | var identifier = expr | identifier = expr | operator_top
+    // expr ::= { stmt } | if (binary_expr) expr | if (binary_expr) expr else expr | while (binary_expr) expr | print expr | var identifier = expr | identifier = expr | binary_expr
     fn expr(&mut self) -> Result<Expr, BaseError> {
         if self.peek() == Some(TokenType::LeftCurly) {
             // { stmt }
@@ -414,26 +438,26 @@ impl<'a> Parser<'a> {
             self.consume_type(TokenType::RightCurly, "Missing } at end of block")?;
             Ok(Expr::Block(Box::new(s)))
         } else if self.peek() == Some(TokenType::If) {
-            // if (operator_top) expr | if (operator_top) expr else expr
+            // if (binary_expr) expr | if (binary_expr) expr else expr
             self.consume();
             self.consume_type(TokenType::LeftParen, "Missing ( after 'if'")?;
-            let cond = Box::new(self.operator_top()?);
+            let cond = Box::new(self.binary_expr()?);
             self.consume_type(TokenType::RightParen, "Missing ) after 'if' condition")?;
             let if_true = Box::new(self.expr()?);
             let if_false = Box::new(if self.peek() == Some(TokenType::Else) {
-                // if (operator_top) expr else expr
+                // if (binary_expr) expr else expr
                 self.consume();
                 self.expr()?
             } else {
-                // if (operator_top) expr
+                // if (binary_expr) expr
                 Expr::Unit
             });
             Ok(Expr::IfThenElse { cond, if_true, if_false })
         } else if self.peek() == Some(TokenType::While) {
-            // while (operator_top) expr
+            // while (binary_expr) expr
             self.consume();
             self.consume_type(TokenType::LeftParen, "Missing ( after 'while'")?;
-            let cond = Box::new(self.operator_top()?);
+            let cond = Box::new(self.binary_expr()?);
             self.consume_type(TokenType::RightParen, "Missing ) after 'while' condition")?;
             let body = Box::new(self.expr()?);
             Ok(Expr::While { cond, body })
@@ -453,8 +477,8 @@ impl<'a> Parser<'a> {
                 Err(BaseError::Syntax(String::from("Missing identifier after 'var'")))
             }
         } else {
-            // operator_top
-            let val = self.operator_top()?;
+            // binary_expr
+            let val = self.binary_expr()?;
             match val {
                 Expr::Var(name) => {
                     // identifier = expr
@@ -470,87 +494,25 @@ impl<'a> Parser<'a> {
             }
         }
     }
-    fn operator_top(&mut self) -> Result<Expr, BaseError> {
-        self.or() // top of the operator fixity grammar chain
+    fn binary_expr(&mut self) -> Result<Expr, BaseError> {
+        self.binary_expr_impl(1) // start from precedence 1
     }
-    // or ::= and ( || and )*
-    fn or(&mut self) -> Result<Expr, BaseError> {
-        let mut expr = self.and()?;
-        while self.peek() == Some(TokenType::Or) {
-            let op = self.consume().unwrap();
-            let right = Box::new(self.and()?);
-            expr = Expr::InfixBinary {
-                left: Box::new(expr),
-                op, right,
+    fn binary_expr_impl(&mut self, prec: u8) -> Result<Expr, BaseError> {
+        // generic parser for infix binary left-associative operators
+        let mut x = self.unary()?;
+        loop {
+            let op = self.peek().unwrap();
+            if op.fixity() < prec {
+                return Ok(x)
             }
-        };
-        Ok(expr)
-    }
-    // and ::= equality ( || equality )*
-    fn and(&mut self) -> Result<Expr, BaseError> {
-        let mut expr = self.equality()?;
-        while self.peek() == Some(TokenType::And) {
-            let op = self.consume().unwrap();
-            let right = Box::new(self.equality()?);
-            expr = Expr::InfixBinary {
-                left: Box::new(expr),
-                op, right,
+            self.consume();
+            let y = self.binary_expr_impl(op.fixity() + 1)?;
+            x = Expr::InfixBinary {
+                left: Box::new(x),
+                op,
+                right: Box::new(y),
             }
-        };
-        Ok(expr)
-    }
-    // equality ::= comparison ( (!= | ==) comparison )*
-    fn equality(&mut self) -> Result<Expr, BaseError> {
-        let mut expr = self.comparison()?;
-        while self.peek() == Some(TokenType::NotEqual) || self.peek() == Some(TokenType::EqualEqual) {
-            let op = self.consume().unwrap();
-            let right = Box::new(self.comparison()?);
-            expr = Expr::InfixBinary {
-                left: Box::new(expr),
-                op, right,
-            }
-        };
-        Ok(expr)
-    }
-    // comparison ::= term ( (> | >= | < | <=) term )*
-    fn comparison(&mut self) -> Result<Expr, BaseError> {
-        let mut expr = self.term()?;
-        while self.peek() == Some(TokenType::Greater) || self.peek() == Some(TokenType::GreaterEqual)
-           || self.peek() == Some(TokenType::Less) || self.peek() == Some(TokenType::LessEqual) {
-            let op = self.consume().unwrap();
-            let right = Box::new(self.term()?);
-            expr = Expr::InfixBinary {
-                left: Box::new(expr),
-                op, right,
-            }
-        };
-        Ok(expr)
-    }
-    // term ::= factor ( (- | +) factor )*
-    fn term(&mut self) -> Result<Expr, BaseError> {
-        let mut expr = self.factor()?;
-        while self.peek() == Some(TokenType::Minus) || self.peek() == Some(TokenType::Plus) {
-            let op = self.consume().unwrap();
-            let right = Box::new(self.factor()?);
-            expr = Expr::InfixBinary {
-                left: Box::new(expr),
-                op, right,
-            }
-        };
-        Ok(expr)
-    }
-    // factor ::= unary ( ( / | * ) unary )*
-    fn factor(&mut self) -> Result<Expr, BaseError> {
-        let mut expr = self.unary()?;
-        while self.peek() == Some(TokenType::ForwardSlash) || self.peek() == Some(TokenType::Asterisk) {
-            let op = self.consume().unwrap();
-            let right = Box::new(self.unary()?);
-            expr = Expr::InfixBinary {
-                left: Box::new(expr),
-                op, right,
-            }
-        };
-        Ok(expr)
+        }
     }
     // unary ::= ( "!" | "-" ) unary | primary
     fn unary(&mut self) -> Result<Expr, BaseError> {
