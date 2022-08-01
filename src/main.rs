@@ -7,6 +7,8 @@ use std::io::{self, BufRead};
 enum TokenType {
     LeftParen,
     RightParen,
+    LeftCurly,
+    RightCurly,
     Plus,
     Minus,
     Asterisk,
@@ -42,6 +44,8 @@ impl ToString for TokenType {
         match self {
             Self::LeftParen => String::from("("),
             Self::RightParen => String::from(")"),
+            Self::LeftCurly => String::from("{"),
+            Self::RightCurly => String::from("}"),
             Self::Plus => String::from("+"),
             Self::Minus => String::from("-"),
             Self::Asterisk => String::from("*"),
@@ -188,6 +192,8 @@ impl<'a> TokenStream<'a> {
         match c {
             '(' => return Some(TokenType::LeftParen),
             ')' => return Some(TokenType::RightParen),
+            '{' => return Some(TokenType::LeftCurly),
+            '}' => return Some(TokenType::RightCurly),
             '+' => return Some(TokenType::Plus),
             '-' => return Some(TokenType::Minus),
             '*' => return Some(TokenType::Asterisk),
@@ -275,8 +281,8 @@ impl<'a> Parser<'a> {
             root: Err(BaseError::Unknown),
             _pos: 0,
         };
-        // parse root as expression
-        p.root = p.expr();
+        // parse root as statement
+        p.root = p.stmt();
         p
     }
     fn peek(&self) -> Option<TokenType> {
@@ -287,9 +293,32 @@ impl<'a> Parser<'a> {
         self._pos += 1;
         t
     }
-    // expr ::= if (equality) expr | if (equality) expr else expr | equality
+    // stmt ::= expr ( ; expr )*
+    fn stmt(&mut self) -> Result<Expr, BaseError> {
+        let mut expr = self.expr()?;
+        while self.peek() == Some(TokenType::Semicolon) {
+            let op = self.consume().unwrap();
+            let right = Box::new(self.expr()?);
+            expr = Expr::InfixBinary {
+                left: Box::new(expr),
+                op, right,
+            }
+        };
+        Ok(expr)
+    }
+    // expr ::= { stmt } | if (equality) expr | if (equality) expr else expr | equality
     fn expr(&mut self) -> Result<Expr, BaseError> {
-        if self.peek() == Some(TokenType::If) {
+        if self.peek() == Some(TokenType::LeftCurly) {
+            // { stmt }
+            self.consume();
+            let s = self.stmt()?;
+            if self.consume() != Some(TokenType::RightCurly) {
+                Err(BaseError::Syntax(String::from("Missing } at end of block")))
+            } else {
+                Ok(s)
+            }
+        } else if self.peek() == Some(TokenType::If) {
+            // if (equality) expr | if (equality) expr else expr
             self.consume();
             if self.consume() != Some(TokenType::LeftParen) {
                 return Err(BaseError::Syntax(String::from("Missing left paren after 'if'")))
@@ -300,13 +329,16 @@ impl<'a> Parser<'a> {
             }
             let if_true = Box::new(self.expr()?);
             let if_false = Box::new(if self.peek() == Some(TokenType::Else) {
+                // if (equality) expr else expr
                 self.consume();
                 self.expr()?
             } else {
+                // if (equality) expr
                 Expr::Unit
             });
             Ok(Expr::IfThenElse { cond, if_true, if_false })
         } else {
+            // equality
             self.equality()
         }
     }
@@ -432,6 +464,8 @@ impl Interpreter {
                 let l = self.interpret(*left)?;
                 let r = self.interpret(*right)?;
                 match (l, op, r) {
+                    (_, TokenType::Semicolon, r) => Ok(r),
+
                     (Expr::Integer(x), TokenType::Plus, Expr::Integer(y)) => Ok(Expr::Integer(x + y)),
                     (l, TokenType::Plus, r) => Err(BaseError::Type(format!("Cannot add {} and {}", l.to_string(), r.to_string()))),
 
