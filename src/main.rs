@@ -107,6 +107,7 @@ enum BaseError {
     NotImplemented,
     Syntax(String),
     Type(String),
+    Name(String),
 }
 
 impl ToString for BaseError {
@@ -116,6 +117,7 @@ impl ToString for BaseError {
             BaseError::NotImplemented => String::from("NotImplementedError"),
             BaseError::Syntax(x) => String::from(format!("SyntaxError: {}", x)),
             BaseError::Type(x) => String::from(format!("TypeError: {}", x)),
+            BaseError::Name(x) => String::from(format!("NameError: {}", x)),
         }
     }
 }
@@ -274,6 +276,8 @@ impl<'a> TokenStream<'a> {
 #[derive(Debug, PartialEq, Clone)]
 enum Expr {
     VarDecl(Rc<String>, Rc<Expr>),
+    Var(String),
+    Block(Box<Expr>),
     IfThenElse { cond: Box<Expr>, if_true: Box<Expr>, if_false: Box<Expr> },
     While { cond: Box<Expr>, body: Box<Expr> },
     PrefixUnary { op: TokenType, expr: Box<Expr> },
@@ -288,6 +292,8 @@ impl ToString for Expr {
     fn to_string(&self) -> String {
         match self {
             Expr::VarDecl(name, expr) => format!("var {} = {};", name, expr.to_string()),
+            Expr::Var(name) => name.clone(),
+            Expr::Block(expr) => format!("{{ {} }}", expr.to_string()),
             Expr::IfThenElse { cond, if_true, if_false } => match **if_false {
                 Expr::Unit => format!(" if ({}) {{ {} }} ", cond.to_string(), if_true.to_string()),
                 _ => format!(" if ({}) {{ {} }} else {{ {} }} ", cond.to_string(), if_true.to_string(), if_false.to_string()),
@@ -316,6 +322,12 @@ impl Environment {
             parent: None,
         }
     }
+    fn new_with_parent(parent: Rc<RefCell<Environment>>) -> Self {
+        Environment {
+            symbols: HashMap::new(),
+            parent: Some(parent),
+        }
+    }
     fn get(&self, name: &String) -> Option<Rc<Expr>> {
         self.symbols.get(name).cloned()
             .or_else(|| self.parent.as_ref().and_then(|p| p.borrow().get(name)))
@@ -340,6 +352,9 @@ impl<'a> Parser<'a> {
         };
         // parse root as statement
         p.root = p.stmt();
+        if p.peek() != Some(TokenType::EOF) {
+            println!("Unexpected tokens")
+        }
         p
     }
     fn peek(&self) -> Option<TokenType> {
@@ -378,7 +393,7 @@ impl<'a> Parser<'a> {
             self.consume();
             let s = self.stmt()?;
             self.consume_type(TokenType::RightCurly, "Missing } at end of block")?;
-            Ok(s)
+            Ok(Expr::Block(Box::new(s)))
         } else if self.peek() == Some(TokenType::If) {
             // if (equality) expr | if (equality) expr else expr
             self.consume();
@@ -495,7 +510,7 @@ impl<'a> Parser<'a> {
             Some(TokenType::String(s)) => Ok(Expr::String(s)),
             Some(TokenType::True) => Ok(Expr::Bool(true)),
             Some(TokenType::False) => Ok(Expr::Bool(false)),
-            Some(TokenType::Identifier(_)) => Err(BaseError::NotImplemented),
+            Some(TokenType::Identifier(name)) => Ok(Expr::Var((*name).clone())),
             Some(TokenType::LeftParen) => {
                 let expr = self.expr()?;
                 match self.peek() {
@@ -531,6 +546,24 @@ impl Interpreter {
     }
     fn interpret(&self, program: Expr, env: Rc<RefCell<Environment>>) -> Result<Expr, BaseError> {
         match program {
+            Expr::VarDecl(name, expr) => {
+                // TODO: this does a lot of cloning
+                let value = self.interpret((*expr).clone(), env.clone())?;
+                env.borrow_mut().set(name, Rc::new(value.clone()));
+                Ok(value)
+            },
+            Expr::Var(name) => {
+                // TODO: this does a lot of cloning
+                let value = env.borrow().get(&name);
+                match value {
+                    Some(value) => Ok((*value).clone()),
+                    None => Err(BaseError::Name(format!("Undefined variable {}", name))),
+                }
+            },
+            Expr::Block(expr) => {
+                let scope = Rc::new(RefCell::new(Environment::new_with_parent(env.clone())));
+                Ok(self.interpret(*expr, scope)?)
+            },
             Expr::IfThenElse { cond, if_true, if_false } => {
                 let b = self.interpret(*cond, env.clone())?;
                 if self.cast_bool(b, env.clone())? {
