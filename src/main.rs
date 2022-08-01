@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use std::io::{self, BufRead};
+use std::rc::Rc;
 
 #[derive(Debug, PartialEq, Clone)]
 enum TokenType {
@@ -26,7 +27,7 @@ enum TokenType {
     LessEqual,
 
     Natural(u64),
-    String(String),
+    String(Rc<String>),
 
     If,
     Else,
@@ -35,7 +36,7 @@ enum TokenType {
     False,
     Return,
 
-    Identifier(String),
+    Identifier(Rc<String>),
 
     EOF,
 }
@@ -69,7 +70,7 @@ impl ToString for TokenType {
             Self::True => String::from("true"),
             Self::False => String::from("false"),
             Self::Return => String::from("return"),
-            Self::Identifier(s) => s.clone(),
+            Self::Identifier(s) => (s as &String).clone(),
             _ => String::from(""),
         }
     }
@@ -222,7 +223,7 @@ impl<'a> TokenStream<'a> {
             while self.test(|c| c != '"' && c != '\n') { self.consume(1) }
             self.consume(1);
             let contents = self.lexeme()[1..self.lexeme().len()-1].to_string();
-            return Some(TokenType::String(contents));
+            return Some(TokenType::String(Rc::new(contents)));
         }
 
         // reserved words
@@ -245,7 +246,7 @@ impl<'a> TokenStream<'a> {
         if c.is_ascii_alphabetic() || c == '_' {
             self.consume(1);
             while self.test(|c| c.is_ascii_alphanumeric() || c == '_') { self.consume(1) }
-            return Some(TokenType::Identifier(String::from(self.lexeme())))
+            return Some(TokenType::Identifier(Rc::new(String::from(self.lexeme()))))
         }
 
         // failed
@@ -260,7 +261,7 @@ enum Expr {
     PrefixUnary { op: TokenType, expr: Box<Expr> },
     InfixBinary { left: Box<Expr>, op: TokenType, right: Box<Expr> },
     Integer(i64),
-    String(String),
+    String(Rc<String>),
     Bool(bool),
     Unit, // the expression "x;" resolves to unit (C++ void / Rust unit)
 }
@@ -500,7 +501,7 @@ impl Interpreter {
                     (_, TokenType::Semicolon, r) => Ok(r),
 
                     (Expr::Integer(x), TokenType::Plus, Expr::Integer(y)) => Ok(Expr::Integer(x + y)),
-                    (Expr::String(x), TokenType::Plus, Expr::String(y)) => Ok(Expr::String(x + y.as_str())),
+                    (Expr::String(x), TokenType::Plus, Expr::String(y)) => Ok(Expr::String(Rc::new(format!("{}{}", x, y)))),
                     (l, TokenType::Plus, r) => Err(BaseError::Type(format!("Cannot add {} and {}", l.to_string(), r.to_string()))),
 
                     (Expr::Integer(x), TokenType::Minus, Expr::Integer(y)) => Ok(Expr::Integer(x - y)),
