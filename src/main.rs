@@ -32,8 +32,10 @@ struct Token<'a> {
 #[derive(Debug)]
 struct TokenStream<'a> {
     source: &'a str,
-    rest: &'a str, // non-empty implies syntax error
     tokens: Vec<Token<'a>>,
+
+    _pos: usize,  // pos in source we're up to in tokenizer
+    _token: usize,  // start pos of current token
 }
 
 enum BaseError {
@@ -50,63 +52,88 @@ impl BaseError {
 
 impl<'a> TokenStream<'a> {
     fn new(source: &'a str) -> Self {
-        let mut tokens = Vec::with_capacity(source.len() / 10);
-        // tokenize
-        let mut rest = &source[..];
+        let mut stream = Self {
+            source,
+            tokens: Vec::with_capacity(source.len() / 10),
+            _pos: 0,
+            _token: 0,
+        };
+        stream.tokenize();
+        stream
+    }
+    fn tokenize(&mut self) {
         loop {
-            match Self::next_token(rest) {
-                Some((token, skip)) => {
-                    rest = &rest[skip + token.lexeme.len()..];
-                    if token.token == TokenType::EOF { tokens.push(token); break }
-                    tokens.push(token);
+            match self.next_token() {
+                Some(token_type) => {
+                    let eof = token_type == TokenType::EOF;
+                    self.tokens.push(Token {
+                        lexeme: self.lexeme(),
+                        token: token_type,
+                    });
+                    if eof { break }
                 },
                 None => break
             }
         }
-        if rest.len() > 0 {
-            BaseError::Syntax(format!("Unexpected characters: {}", &rest[..std::cmp::min(rest.len(), 10)])).print()
-        }
-        Self {
-            source,
-            rest,
-            tokens,
+        if self._pos < self.source.len() {
+            let snippet = &self.source[self._pos..std::cmp::min(self._pos+10, self.source.len())];
+            BaseError::Syntax(format!("Unexpected characters: {}", snippet)).print()
         }
     }
-    fn next_token(_source: &'a str) -> Option<(Token<'a>, usize)> {
-        // TODO: we could make this stateful and build peek, consume, consumeIf(pred), skipIf(pred) methods
-        //   which would simplify most of these cases
-        // skip over leading spaces
-        let mut spaces: usize = 0;
-        for c in _source.chars() {
-            if c.is_whitespace() { spaces += 1 }
-            else { break }
+    fn peek(&self) -> Option<char> {
+        self.source[self._pos..].chars().nth(0)
+    }
+    fn test<F>(&mut self, pred: F) -> bool
+        where F: FnOnce(char) -> bool
+    {
+        match self.peek() {
+            Some(c) => pred(c),
+            None => false,
         }
-        let source = &_source[spaces..];
-        if source.len() == 0 {
-            return Some((Token { lexeme: &source[0..0], token: TokenType::EOF }, spaces))
-        }
+    }
+    fn consume(&mut self, n: usize) {
+        self._pos += n
+    }
+    fn skip(&mut self) {
+        self._pos += 1;
+        self._token = self._pos
+    }
+    fn lexeme(&self) -> &'a str {
+        &self.source[self._token..self._pos]
+    }
+    fn rest(&self) -> &'a str {
+        &self.source[self._token..]
+    }
+    fn next_token(&mut self) -> Option<TokenType> {
+        // start scanning the new token from the end of the last token
+        self._token = self._pos;
+
+        // skip whitespace, handle EOFs
+        while self.test(|c| c.is_whitespace()) { self.skip() }
+        if let None = self.peek() { return Some(TokenType::EOF) }
+        let c = self.peek().unwrap();
+
         // single character tokens
-        let c = source.chars().next()?;
-        if let Some(token) = match c {
-            '(' => Some(TokenType::LeftParen),
-            ')' => Some(TokenType::RightParen),
-            '+' => Some(TokenType::Plus),
-            '-' => Some(TokenType::Minus),
-            '*' => Some(TokenType::Asterisk),
-            '/' => Some(TokenType::ForwardSlash),
-            '=' => Some(TokenType::Equals),
-            ';' => Some(TokenType::Semicolon),
-            _ => None
-        } { return Some((Token { lexeme: &source[0..1], token }, spaces)) }
+        self.consume(1);
+        match c {
+            '(' => return Some(TokenType::LeftParen),
+            ')' => return Some(TokenType::RightParen),
+            '+' => return Some(TokenType::Plus),
+            '-' => return Some(TokenType::Minus),
+            '*' => return Some(TokenType::Asterisk),
+            '/' => return Some(TokenType::ForwardSlash),
+            '=' => return Some(TokenType::Equals),
+            ';' => return Some(TokenType::Semicolon),
+            _ => self._pos -= 1  // un-consume
+        }
+
         // natural numbers
-        let mut lexeme = &source[0..0];
-        for (i, c) in source.chars().enumerate() {
-            if c.is_digit(10) { lexeme = &source[0..i+1] }
-            else { break }
+        if c.is_numeric() {
+            while self.test(|c| c.is_numeric()) { self.consume(1) }
+            let n = self.lexeme().parse::<u64>().unwrap();
+            return Some(TokenType::Natural(n));
         }
-        if lexeme.len() > 0 {
-            return Some((Token { lexeme, token: TokenType::Natural(lexeme.parse::<u64>().unwrap()) }, spaces))
-        }
+
         // reserved words
         const RESERVED: [(&str, TokenType); 6] = [
             ("if", TokenType::If),
@@ -117,20 +144,19 @@ impl<'a> TokenStream<'a> {
             ("return", TokenType::Return),
         ];
         for (lexeme, token) in RESERVED {
-            if source.starts_with(lexeme) {
-                return Some((Token { lexeme, token }, spaces))
+            if self.rest().starts_with(lexeme) {
+                self.consume(lexeme.len());
+                return Some(token)
             }
         }
+
         // identifiers
-        let c = source.chars().next()?;
         if c.is_ascii_alphabetic() || c == '_' {
-            let mut len = 1;
-            for c in source[1..].chars() {
-                if c.is_ascii_alphanumeric() || c == '-' { len += 1 }
-                else { break }
-            }
-            return Some((Token { lexeme: &source[0..len], token: TokenType::Identifier }, spaces))
+            self.consume(1);
+            while self.test(|c| c.is_ascii_alphanumeric() || c == '_') { self.consume(1) }
+            return Some(TokenType::Identifier)
         }
+
         // failed
         None
     }
