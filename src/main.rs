@@ -12,6 +12,7 @@ enum TokenType {
     Asterisk,
     ForwardSlash,
     Semicolon,
+    Comma,
 
     Equal,
     EqualEqual,
@@ -46,6 +47,7 @@ impl ToString for TokenType {
             Self::Asterisk => String::from("*"),
             Self::ForwardSlash => String::from("/"),
             Self::Semicolon => String::from(";"),
+            Self::Comma => String::from(","),
             Self::Equal => String::from("="),
             Self::EqualEqual => String::from("=="),
             Self::Not => String::from("!"),
@@ -61,7 +63,7 @@ impl ToString for TokenType {
             Self::False => String::from("false"),
             Self::While => String::from("while"),
             Self::Return => String::from("return"),
-            Self::Identifier => panic!("help!"),
+            Self::Identifier => panic!("help!"), // TODO
             _ => String::from(""),
         }
     }
@@ -88,14 +90,18 @@ struct TokenStream<'a> {
 #[derive(Debug, Clone)]
 enum BaseError {
     Unknown,
+    NotImplemented,
     Syntax(String),
+    Type(String),
 }
 
 impl ToString for BaseError {
     fn to_string(&self) -> String {
         match self {
             BaseError::Unknown => String::from("UnknownError"),
+            BaseError::NotImplemented => String::from("NotImplementedError"),
             BaseError::Syntax(x) => String::from(format!("SyntaxError: {}", x)),
+            BaseError::Type(x) => String::from(format!("TypeError: {}", x)),
         }
     }
 }
@@ -187,6 +193,7 @@ impl<'a> TokenStream<'a> {
             '*' => return Some(TokenType::Asterisk),
             '/' => return Some(TokenType::ForwardSlash),
             ';' => return Some(TokenType::Semicolon),
+            ',' => return Some(TokenType::Comma),
             '=' => return Some(TokenType::Equal),
             '!' => return Some(TokenType::Not),
             '>' => return Some(TokenType::Greater),
@@ -229,11 +236,11 @@ impl<'a> TokenStream<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Expr {
     PrefixUnary { op: TokenType, expr: Box<Expr> },
     InfixBinary { left: Box<Expr>, op: TokenType, right: Box<Expr> },
-    Natural(u64),
+    Integer(i64),
     Bool(bool),
 }
 
@@ -242,7 +249,7 @@ impl ToString for Expr {
         match self {
             Expr::PrefixUnary { op, expr } => format!("{}{}", op.to_string(), expr.to_string()),
             Expr::InfixBinary { left, op, right } => format!("({} {} {})", left.to_string(), op.to_string(), right.to_string()),
-            Expr::Natural(n) => n.to_string(),
+            Expr::Integer(n) => n.to_string(),
             Expr::Bool(b) => b.to_string(),
         }
     }
@@ -345,11 +352,11 @@ impl<'a> Parser<'a> {
     // primary ::= NUMBER | STRING | true | false | "(" expr ")"
     fn primary(&mut self) -> Result<Expr, BaseError> {
         match self.consume() {
-            Some(TokenType::Natural(n)) => Ok(Expr::Natural(n)),
+            Some(TokenType::Natural(n)) => Ok(Expr::Integer(n as i64)),
             // Some(TokenType::String(s)) => Ok(Expr::String(s)),
             Some(TokenType::True) => Ok(Expr::Bool(true)),
             Some(TokenType::False) => Ok(Expr::Bool(false)),
-            Some(TokenType::Identifier) => panic!("help!"),
+            Some(TokenType::Identifier) => Err(BaseError::NotImplemented),
             Some(TokenType::LeftParen) => {
                 let expr = self.expr()?;
                 match self.peek() {
@@ -357,12 +364,75 @@ impl<'a> Parser<'a> {
                         self.consume();
                         Ok(expr)
                     },
+                    // TODO: when we encounter a syntax error we should throw an exception
+                    // and catch it in the statement parser to synchronise; drop all tokens until
+                    // the next statement, and continue parsing to accumulate later errors
                     Some(tok) => Err(BaseError::Syntax(format!("Unexpected token: {}", tok.to_string()))),
                     None => Err(BaseError::Unknown),
                 }
             },
             Some(tok) => Err(BaseError::Syntax(format!("Unexpected token: {}", tok.to_string()))),
             _ => Err(BaseError::Unknown),
+        }
+    }
+}
+
+struct Interpreter {}
+
+impl Interpreter {
+    fn interpret(&self, program: Expr) -> Result<Expr, BaseError> {
+        match program {
+            Expr::PrefixUnary { op, expr } => {
+                let v = self.interpret(*expr)?;
+                match (op, v) {
+                    (TokenType::Not, Expr::Bool(b)) => Ok(Expr::Bool(!b)),
+                    (TokenType::Not, v) => Err(BaseError::Type(format!("Cannot use boolean negation on {}", v.to_string()))),
+
+                    (TokenType::Minus, Expr::Integer(n)) => Ok(Expr::Integer(-n)),
+                    (TokenType::Minus, v) => Err(BaseError::Type(format!("Cannot negate {}", v.to_string()))),
+
+                    _ => Err(BaseError::Unknown)
+                }
+            },
+            Expr::InfixBinary { left, op, right } => {
+                let l = self.interpret(*left)?;
+                let r = self.interpret(*right)?;
+                match (l, op, r) {
+                    (Expr::Integer(x), TokenType::Plus, Expr::Integer(y)) => Ok(Expr::Integer(x + y)),
+                    (l, TokenType::Plus, r) => Err(BaseError::Type(format!("Cannot add {} and {}", l.to_string(), r.to_string()))),
+
+                    (Expr::Integer(x), TokenType::Minus, Expr::Integer(y)) => Ok(Expr::Integer(x - y)),
+                    (l, TokenType::Minus, r) => Err(BaseError::Type(format!("Cannot subtract {} and {}", l.to_string(), r.to_string()))),
+
+                    (Expr::Integer(x), TokenType::Asterisk, Expr::Integer(y)) => Ok(Expr::Integer(x * y)),
+                    (l, TokenType::Asterisk, r) => Err(BaseError::Type(format!("Cannot multiple {} and {}", l.to_string(), r.to_string()))),
+
+                    (Expr::Integer(x), TokenType::ForwardSlash, Expr::Integer(y)) => Ok(Expr::Integer(x / y)),
+                    (l, TokenType::ForwardSlash, r) => Err(BaseError::Type(format!("Cannot divide {} and {}", l.to_string(), r.to_string()))),
+
+                    (_, TokenType::Comma, _) => Err(BaseError::NotImplemented),
+                    (_, TokenType::Equal, _) => Err(BaseError::NotImplemented),
+
+                    (x, TokenType::EqualEqual, y) => Ok(Expr::Bool(x == y)),
+                    (x, TokenType::NotEqual, y) => Ok(Expr::Bool(x != y)),
+
+                    (Expr::Integer(x), TokenType::Greater, Expr::Integer(y)) => Ok(Expr::Bool(x > y)),
+                    (l, TokenType::Greater, r) => Err(BaseError::Type(format!("Cannot compare {} and {}", l.to_string(), r.to_string()))),
+
+                    (Expr::Integer(x), TokenType::GreaterEqual, Expr::Integer(y)) => Ok(Expr::Bool(x >= y)),
+                    (l, TokenType::GreaterEqual, r) => Err(BaseError::Type(format!("Cannot compare {} and {}", l.to_string(), r.to_string()))),
+
+                    (Expr::Integer(x), TokenType::Less, Expr::Integer(y)) => Ok(Expr::Bool(x < y)),
+                    (l, TokenType::Less, r) => Err(BaseError::Type(format!("Cannot compare {} and {}", l.to_string(), r.to_string()))),
+
+                    (Expr::Integer(x), TokenType::LessEqual, Expr::Integer(y)) => Ok(Expr::Bool(x <= y)),
+                    (l, TokenType::LessEqual, r) => Err(BaseError::Type(format!("Cannot compare {} and {}", l.to_string(), r.to_string()))),
+
+                    _ => Err(BaseError::Unknown)
+                }
+            }
+            // literals
+            x => Ok(x),
         }
     }
 }
@@ -379,7 +449,14 @@ fn main() {
         // dbg!(parser.stream.tokens);
         // dbg!(parser.root);
         match parser.root {
-            Ok(tree) => println!("{}\n", tree.to_string()),
+            Ok(tree) => {
+                println!("{}", tree.to_string());
+                let interpreter = Interpreter {};
+                match interpreter.interpret(tree) {
+                    Ok(normalized) => println!("{}\n", normalized.to_string()),
+                    Err(e) => println!("{}\n", e.to_string())
+                }
+            },
             Err(e) => println!("{}\n", e.to_string())
         }
     }
