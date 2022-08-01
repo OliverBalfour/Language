@@ -40,7 +40,7 @@ enum TokenType {
     Print,
     Var,
 
-    Identifier(Rc<String>),
+    Identifier(String),
 
     Comment,
     EOF,
@@ -265,7 +265,7 @@ impl<'a> TokenStream<'a> {
         if c.is_ascii_alphabetic() || c == '_' {
             self.consume(1);
             while self.test(|c| c.is_ascii_alphanumeric() || c == '_') { self.consume(1) }
-            return Some(TokenType::Identifier(Rc::new(String::from(self.lexeme()))))
+            return Some(TokenType::Identifier(String::from(self.lexeme())))
         }
 
         // failed
@@ -275,7 +275,7 @@ impl<'a> TokenStream<'a> {
 
 #[derive(Debug, PartialEq, Clone)]
 enum Expr {
-    VarDecl(Rc<String>, Rc<Expr>),
+    VarDecl(String, Rc<Expr>),
     VarAssign(String, Rc<Expr>),
     Var(String),
     Block(Box<Expr>),
@@ -313,7 +313,7 @@ impl ToString for Expr {
 
 // Variable declarations in a lexical scope
 struct Environment {
-    symbols: HashMap<Rc<String>, Rc<Expr>>,
+    symbols: HashMap<String, Rc<Expr>>,
     parent: Option<Rc<RefCell<Environment>>>,
 }
 
@@ -335,11 +335,11 @@ impl Environment {
             .or_else(|| self.parent.as_ref().and_then(|p| p.borrow().get(name)))
     }
     // define a new variable in the current environment, shadowing any in parent ones
-    fn define(&mut self, name: Rc<String>, expr: Rc<Expr>) {
+    fn define(&mut self, name: String, expr: Rc<Expr>) {
         self.symbols.insert(name, expr);
     }
     // set/update an existing variable, choosing the most recent definition
-    fn set(&mut self, name: Rc<String>, expr: Rc<Expr>) {
+    fn set(&mut self, name: String, expr: Rc<Expr>) {
         if self.symbols.contains_key(&name) {
             self.symbols.insert(name, expr);
         } else {
@@ -536,7 +536,7 @@ impl<'a> Parser<'a> {
             Some(TokenType::String(s)) => Ok(Expr::String(s)),
             Some(TokenType::True) => Ok(Expr::Bool(true)),
             Some(TokenType::False) => Ok(Expr::Bool(false)),
-            Some(TokenType::Identifier(name)) => Ok(Expr::Var((*name).clone())),
+            Some(TokenType::Identifier(name)) => Ok(Expr::Var(name)),
             Some(TokenType::LeftParen) => {
                 let expr = self.expr()?;
                 match self.peek() {
@@ -580,8 +580,7 @@ impl Interpreter {
             },
             Expr::VarAssign(name, expr) => {
                 let value = self.interpret((*expr).clone(), env.clone())?;
-                // TODO: remove Rc<String>
-                env.borrow_mut().set(Rc::new(name), Rc::new(value.clone()));
+                env.borrow_mut().set(name, Rc::new(value.clone()));
                 Ok(value)
             },
             Expr::Var(name) => {
