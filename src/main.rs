@@ -3,7 +3,7 @@
 
 use std::io::{self, BufRead};
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone)]
 enum TokenType {
     LeftParen,
     RightParen,
@@ -26,6 +26,7 @@ enum TokenType {
     LessEqual,
 
     Natural(u64),
+    String(String),
 
     If,
     Else,
@@ -34,7 +35,7 @@ enum TokenType {
     False,
     Return,
 
-    Identifier,
+    Identifier(String),
 
     EOF,
 }
@@ -61,13 +62,14 @@ impl ToString for TokenType {
             Self::Less => String::from("<"),
             Self::LessEqual => String::from("<="),
             Self::Natural(n) => format!("{}", n),
+            Self::String(s) => format!("\"{}\"", s.clone()),
             Self::If => String::from("if"),
             Self::Else => String::from("else"),
             Self::While => String::from("while"),
             Self::True => String::from("true"),
             Self::False => String::from("false"),
             Self::Return => String::from("return"),
-            Self::Identifier => panic!("help!"), // TODO
+            Self::Identifier(s) => s.clone(),
             _ => String::from(""),
         }
     }
@@ -214,6 +216,15 @@ impl<'a> TokenStream<'a> {
             return Some(TokenType::Natural(n));
         }
 
+        // strings
+        if c == '"' {
+            self.consume(1);
+            while self.test(|c| c != '"' && c != '\n') { self.consume(1) }
+            self.consume(1);
+            let contents = self.lexeme()[1..self.lexeme().len()-1].to_string();
+            return Some(TokenType::String(contents));
+        }
+
         // reserved words
         const RESERVED: [(&str, TokenType); 6] = [
             ("if", TokenType::If),
@@ -234,7 +245,7 @@ impl<'a> TokenStream<'a> {
         if c.is_ascii_alphabetic() || c == '_' {
             self.consume(1);
             while self.test(|c| c.is_ascii_alphanumeric() || c == '_') { self.consume(1) }
-            return Some(TokenType::Identifier)
+            return Some(TokenType::Identifier(String::from(self.lexeme())))
         }
 
         // failed
@@ -249,6 +260,7 @@ enum Expr {
     PrefixUnary { op: TokenType, expr: Box<Expr> },
     InfixBinary { left: Box<Expr>, op: TokenType, right: Box<Expr> },
     Integer(i64),
+    String(String),
     Bool(bool),
     Unit, // the expression "x;" resolves to unit (C++ void / Rust unit)
 }
@@ -264,6 +276,7 @@ impl ToString for Expr {
             Expr::PrefixUnary { op, expr } => format!("{}{}", op.to_string(), expr.to_string()),
             Expr::InfixBinary { left, op, right } => format!("({} {} {})", left.to_string(), op.to_string(), right.to_string()),
             Expr::Integer(n) => n.to_string(),
+            Expr::String(s) => format!("\"{}\"", s),
             Expr::Bool(b) => b.to_string(),
             Expr::Unit => String::from(""),
         }
@@ -288,7 +301,7 @@ impl<'a> Parser<'a> {
         p
     }
     fn peek(&self) -> Option<TokenType> {
-        Some(self.stream.tokens[self._pos..].iter().nth(0)?.token)
+        Some(self.stream.tokens[self._pos..].iter().nth(0)?.token.clone())
     }
     fn consume(&mut self) -> Option<TokenType> {
         let t = self.peek();
@@ -425,10 +438,10 @@ impl<'a> Parser<'a> {
     fn primary(&mut self) -> Result<Expr, BaseError> {
         match self.consume() {
             Some(TokenType::Natural(n)) => Ok(Expr::Integer(n as i64)),
-            // Some(TokenType::String(s)) => Ok(Expr::String(s)),
+            Some(TokenType::String(s)) => Ok(Expr::String(s)),
             Some(TokenType::True) => Ok(Expr::Bool(true)),
             Some(TokenType::False) => Ok(Expr::Bool(false)),
-            Some(TokenType::Identifier) => Err(BaseError::NotImplemented),
+            Some(TokenType::Identifier(_)) => Err(BaseError::NotImplemented),
             Some(TokenType::LeftParen) => {
                 let expr = self.expr()?;
                 match self.peek() {
@@ -487,6 +500,7 @@ impl Interpreter {
                     (_, TokenType::Semicolon, r) => Ok(r),
 
                     (Expr::Integer(x), TokenType::Plus, Expr::Integer(y)) => Ok(Expr::Integer(x + y)),
+                    (Expr::String(x), TokenType::Plus, Expr::String(y)) => Ok(Expr::String(x + y.as_str())),
                     (l, TokenType::Plus, r) => Err(BaseError::Type(format!("Cannot add {} and {}", l.to_string(), r.to_string()))),
 
                     (Expr::Integer(x), TokenType::Minus, Expr::Integer(y)) => Ok(Expr::Integer(x - y)),
@@ -528,7 +542,7 @@ impl Interpreter {
         match v {
             Expr::Bool(false) => Ok(false),
             Expr::Integer(0) => Ok(false),
-            // Expr::String(s) => Ok(s.len() > 0),
+            Expr::String(s) => Ok(s.len() > 0),
             _ => Ok(true)
         }
     }
