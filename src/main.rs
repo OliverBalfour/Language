@@ -327,6 +327,14 @@ impl<'a> Parser<'a> {
         self._pos += 1;
         t
     }
+    fn consume_type(&mut self, token_type: TokenType, message: &str) -> Result<(), BaseError> {
+        if self.peek() == Some(token_type) {
+            self.consume();
+            Ok(())
+        } else {
+            Err(BaseError::Syntax(message.to_string()))
+        }
+    }
     // stmt ::= expr ( ; expr )*
     fn stmt(&mut self) -> Result<Expr, BaseError> {
         let mut expr = self.expr()?;
@@ -346,21 +354,14 @@ impl<'a> Parser<'a> {
             // { stmt }
             self.consume();
             let s = self.stmt()?;
-            if self.consume() != Some(TokenType::RightCurly) {
-                Err(BaseError::Syntax(String::from("Missing } at end of block")))
-            } else {
-                Ok(s)
-            }
+            self.consume_type(TokenType::RightCurly, "Missing } at end of block")?;
+            Ok(s)
         } else if self.peek() == Some(TokenType::If) {
             // if (equality) expr | if (equality) expr else expr
             self.consume();
-            if self.consume() != Some(TokenType::LeftParen) {
-                return Err(BaseError::Syntax(String::from("Missing left paren after 'if'")))
-            }
+            self.consume_type(TokenType::LeftParen, "Missing ( after 'if'")?;
             let cond = Box::new(self.equality()?);
-            if self.consume() != Some(TokenType::RightParen) {
-                return Err(BaseError::Syntax(String::from("Missing right paren after 'if' condition")))
-            }
+            self.consume_type(TokenType::RightParen, "Missing ) after 'if' condition")?;
             let if_true = Box::new(self.expr()?);
             let if_false = Box::new(if self.peek() == Some(TokenType::Else) {
                 // if (equality) expr else expr
@@ -374,13 +375,9 @@ impl<'a> Parser<'a> {
         } else if self.peek() == Some(TokenType::While) {
             // while (equality) expr
             self.consume();
-            if self.consume() != Some(TokenType::LeftParen) {
-                return Err(BaseError::Syntax(String::from("Missing left paren after 'if'")))
-            }
+            self.consume_type(TokenType::LeftParen, "Missing ( after 'while'")?;
             let cond = Box::new(self.equality()?);
-            if self.consume() != Some(TokenType::RightParen) {
-                return Err(BaseError::Syntax(String::from("Missing right paren after 'if' condition")))
-            }
+            self.consume_type(TokenType::RightParen, "Missing ) after 'while' condition")?;
             let body = Box::new(self.expr()?);
             Ok(Expr::While { cond, body })
         } else if self.peek() == Some(TokenType::Print) {
@@ -392,9 +389,7 @@ impl<'a> Parser<'a> {
             // var identifier = expr
             self.consume();
             if let Some(TokenType::Identifier(ident)) = self.consume() {
-                if self.consume() != Some(TokenType::Equal) {
-                    return Err(BaseError::Syntax(String::from("Missing equal sign after variable name")))
-                }
+                self.consume_type(TokenType::Equal, "Missing equal sign after variable name")?;
                 let expr = Rc::new(self.expr()?);
                 Ok(Expr::VarDecl(ident, expr))
             } else {
