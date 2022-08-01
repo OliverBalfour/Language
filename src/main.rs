@@ -305,16 +305,16 @@ impl<'a> TokenStream<'a> {
 
 #[derive(Debug, PartialEq, Clone)]
 enum Expr {
-    Fn { args: Vec<String>, body: Rc<Expr> },
-    FnCall { name: String, args: Vec<Box<Expr>> },
+    Fn { args: Vec<String>, body: Rc<Expr>, env: Option<Rc<RefCell<Environment>>> },
+    FnCall { name: String, args: Vec<Rc<Expr>> },
     VarDecl(String, Rc<Expr>),
     VarAssign(String, Rc<Expr>),
     Var(String),
-    Block(Box<Expr>),
-    IfThenElse { cond: Box<Expr>, if_true: Box<Expr>, if_false: Box<Expr> },
-    While { cond: Box<Expr>, body: Box<Expr> },
-    PrefixUnary { op: TokenType, expr: Box<Expr> },
-    InfixBinary { left: Box<Expr>, op: TokenType, right: Box<Expr> },
+    Block(Rc<Expr>),
+    IfThenElse { cond: Rc<Expr>, if_true: Rc<Expr>, if_false: Rc<Expr> },
+    While { cond: Rc<Expr>, body: Rc<Expr> },
+    PrefixUnary { op: TokenType, expr: Rc<Expr> },
+    InfixBinary { left: Rc<Expr>, op: TokenType, right: Rc<Expr> },
     Integer(i64),
     String(Rc<String>),
     Bool(bool),
@@ -324,7 +324,7 @@ enum Expr {
 impl ToString for Expr {
     fn to_string(&self) -> String {
         match self {
-            Expr::Fn { args: _, body: _ } => panic!("Cannot pretty-print a raw function"),
+            Expr::Fn { args: _, body: _, env: _ } => panic!("Cannot pretty-print a raw function"),
             Expr::FnCall { name, args } => {
                 let mut s = String::new();
                 s.push_str(&name);
@@ -337,7 +337,7 @@ impl ToString for Expr {
                 s
             },
             Expr::VarDecl(name, expr) => match expr.as_ref() {
-                Expr::Fn { args, body } => {
+                Expr::Fn { args, body, env: _ } => {
                     let mut s = String::new();
                     s.push_str(&format!("fn {}(", name));
                     for (i, arg) in args.iter().enumerate() {
@@ -373,6 +373,7 @@ impl ToString for Expr {
 }
 
 // Variable declarations in a lexical scope
+#[derive(Debug, PartialEq, Clone)]
 struct Environment {
     symbols: HashMap<String, Rc<Expr>>,
     parent: Option<Rc<RefCell<Environment>>>,
@@ -455,9 +456,9 @@ impl<'a> Parser<'a> {
         let mut expr = self.expr()?;
         while self.peek() == Some(TokenType::Semicolon) {
             let op = self.consume().unwrap();
-            let right = Box::new(self.expr()?);
+            let right = Rc::new(self.expr()?);
             expr = Expr::InfixBinary {
-                left: Box::new(expr),
+                left: Rc::new(expr),
                 op, right,
             }
         };
@@ -472,15 +473,15 @@ impl<'a> Parser<'a> {
             self.consume();
             let s = self.stmt()?;
             self.consume_type(TokenType::RightCurly, "Missing } at end of block")?;
-            Ok(Expr::Block(Box::new(s)))
+            Ok(Expr::Block(Rc::new(s)))
         } else if self.peek() == Some(TokenType::If) {
             // if (binary_expr) expr | if (binary_expr) expr else expr
             self.consume();
             self.consume_type(TokenType::LeftParen, "Missing ( after 'if'")?;
-            let cond = Box::new(self.binary_expr()?);
+            let cond = Rc::new(self.binary_expr()?);
             self.consume_type(TokenType::RightParen, "Missing ) after 'if' condition")?;
-            let if_true = Box::new(self.expr()?);
-            let if_false = Box::new(if self.peek() == Some(TokenType::Else) {
+            let if_true = Rc::new(self.expr()?);
+            let if_false = Rc::new(if self.peek() == Some(TokenType::Else) {
                 // if (binary_expr) expr else expr
                 self.consume();
                 self.expr()?
@@ -493,9 +494,9 @@ impl<'a> Parser<'a> {
             // while (binary_expr) expr
             self.consume();
             self.consume_type(TokenType::LeftParen, "Missing ( after 'while'")?;
-            let cond = Box::new(self.binary_expr()?);
+            let cond = Rc::new(self.binary_expr()?);
             self.consume_type(TokenType::RightParen, "Missing ) after 'while' condition")?;
-            let body = Box::new(self.expr()?);
+            let body = Rc::new(self.expr()?);
             Ok(Expr::While { cond, body })
         } else if self.peek() == Some(TokenType::Fn) {
             // fn identifier ( ( identifier (, identifier)* )? ) { stmt }
@@ -521,7 +522,7 @@ impl<'a> Parser<'a> {
                 self.consume_type(TokenType::RightCurly, "Missing } after function body")?;
                 Ok(Expr::VarDecl(
                     name,
-                    Rc::new(Expr::Fn { args, body: Rc::new(body) })
+                    Rc::new(Expr::Fn { args, body: Rc::new(body), env: None }),
                 ))
             } else {
                 Err(BaseError::Syntax("Missing function name".to_string()))
@@ -529,7 +530,7 @@ impl<'a> Parser<'a> {
         } else if self.peek() == Some(TokenType::Print) || self.peek() == Some(TokenType::Return) {
             // print expr | return expr
             let op = self.consume().unwrap();
-            let expr = Box::new(self.expr()?);
+            let expr = Rc::new(self.expr()?);
             Ok(Expr::PrefixUnary { op, expr })
         } else if self.peek() == Some(TokenType::Var) {
             // var identifier = expr
@@ -575,9 +576,9 @@ impl<'a> Parser<'a> {
             self.consume();
             let y = self.binary_expr_impl(op.fixity() + 1)?;
             x = Expr::InfixBinary {
-                left: Box::new(x),
+                left: Rc::new(x),
                 op,
-                right: Box::new(y),
+                right: Rc::new(y),
             }
         }
     }
@@ -590,7 +591,7 @@ impl<'a> Parser<'a> {
                 self.consume();
                 let mut args = Vec::new();
                 while self.peek() != Some(TokenType::RightParen) {
-                    args.push(Box::new(self.expr()?));
+                    args.push(Rc::new(self.expr()?));
                     if self.peek() != Some(TokenType::Comma) {
                         break;
                     }
@@ -609,7 +610,7 @@ impl<'a> Parser<'a> {
         if self.peek() == Some(TokenType::Not) || self.peek() == Some(TokenType::Minus) {
             // recursive case
             let op = self.consume().unwrap();
-            let expr = Box::new(self.unary()?);
+            let expr = Rc::new(self.unary()?);
             Ok(Expr::PrefixUnary { op, expr })
         } else {
             // base case
@@ -654,18 +655,18 @@ impl Interpreter {
             global: Rc::new(RefCell::new(Environment::new())),
         }
     }
-    fn interpret_program(&mut self, program: &Expr) -> Result<Rc<Expr>, BaseError> {
+    fn interpret_program(&mut self, program: Rc<Expr>) -> Result<Rc<Expr>, BaseError> {
         self.interpret(program, self.global.clone())
     }
-    fn interpret(&self, program: &Expr, env: Rc<RefCell<Environment>>) -> Result<Rc<Expr>, BaseError> {
-        match program {
+    fn interpret(&self, program: Rc<Expr>, env: Rc<RefCell<Environment>>) -> Result<Rc<Expr>, BaseError> {
+        match program.as_ref() {
             Expr::VarDecl(name, expr) => {
-                let value = self.interpret(expr, env.clone())?;
+                let value = self.interpret(expr.clone(), env.clone())?;
                 env.borrow_mut().define(name.clone(), value.clone());
                 Ok(value)
             },
             Expr::VarAssign(name, expr) => {
-                let value = self.interpret(expr, env.clone())?;
+                let value = self.interpret(expr.clone(), env.clone())?;
                 env.borrow_mut().set(name.clone(), value.clone());
                 Ok(value)
             },
@@ -676,18 +677,25 @@ impl Interpreter {
                     None => Err(BaseError::Name(format!("Undefined variable {}", name))),
                 }
             },
+            Expr::Fn { args, body, env: _ } => {
+                Ok(Rc::new(Expr::Fn {
+                    args: args.clone(),
+                    body: body.clone(),
+                    env: Some(env.clone()),
+                }))
+            },
             Expr::FnCall { name, args } => {
                 match env.borrow().get(&name) {
                     Some(f) => match f.as_ref() {
-                        Expr::Fn { args: param_names, body } => {
+                        Expr::Fn { args: param_names, body, env: parent_scope } => {
                             if param_names.len() != args.len() {
                                 return Err(BaseError::Syntax(format!("Function {} expects {} arguments", name, param_names.len())));
                             }
-                            let scope = Rc::new(RefCell::new(Environment::new_with_parent(env.clone())));
+                            let scope = Rc::new(RefCell::new(Environment::new_with_parent(parent_scope.as_ref().unwrap().clone())));
                             for (name, arg) in param_names.iter().zip(args.iter()) {
-                                scope.borrow_mut().define(name.clone(), self.interpret(arg, env.clone())?);
+                                scope.borrow_mut().define(name.clone(), self.interpret(arg.clone(), env.clone())?);
                             }
-                            self.interpret(body, scope)
+                            self.interpret(body.clone(), scope)
                         },
                         _ => Err(BaseError::Syntax(format!("Expected function, found {}", f.to_string()))),
                     },
@@ -696,24 +704,24 @@ impl Interpreter {
             },
             Expr::Block(expr) => {
                 let scope = Rc::new(RefCell::new(Environment::new_with_parent(env.clone())));
-                Ok(self.interpret(expr, scope)?)
+                Ok(self.interpret(expr.clone(), scope)?)
             },
             Expr::IfThenElse { cond, if_true, if_false } => {
-                let b = self.interpret(cond, env.clone())?;
-                if self.cast_bool(b.as_ref(), env.clone())? {
-                    self.interpret(if_true, env)
+                let b = self.interpret(cond.clone(), env.clone())?;
+                if self.cast_bool(b, env.clone())? {
+                    self.interpret(if_true.clone(), env)
                 } else {
-                    self.interpret(if_false, env)
+                    self.interpret(if_false.clone(), env)
                 }
             },
             Expr::While { cond, body } => {
-                while self.cast_bool(self.interpret(cond, env.clone())?.as_ref(), env.clone())? {
-                    self.interpret(body, env.clone())?;
+                while self.cast_bool(self.interpret(cond.clone(), env.clone())?, env.clone())? {
+                    self.interpret(body.clone(), env.clone())?;
                 }
                 Ok(Rc::new(Expr::Unit))  // TODO: make singleton unit
             },
             Expr::PrefixUnary { op, expr } => {
-                let v = self.interpret(expr, env)?;
+                let v = self.interpret(expr.clone(), env)?;
                 match (op, v.as_ref()) {
                     (TokenType::Print, Expr::Integer(n)) => { println!("{}", n); Ok(Rc::new(Expr::Unit)) },  // TODO: make singleton unit
                     (TokenType::Print, Expr::String(s)) => { println!("{}", s); Ok(Rc::new(Expr::Unit)) },
@@ -722,7 +730,7 @@ impl Interpreter {
                     (TokenType::Print, v) => Err(BaseError::Syntax(format!("Cannot print unexpected value: {}", v.to_string()))),
 
                     // exit the function early with the value
-                    (TokenType::Return, v) => Ok(Rc::new(v.clone())),  // TODO
+                    (TokenType::Return, _) => Ok(v.clone()),
 
                     (TokenType::Not, Expr::Bool(b)) => Ok(Rc::new(Expr::Bool(!b))),
                     (TokenType::Not, v) => Err(BaseError::Type(format!("Cannot use boolean negation on {}", v.to_string()))),
@@ -734,10 +742,10 @@ impl Interpreter {
                 }
             },
             Expr::InfixBinary { left, op, right } => {
-                let l = self.interpret(left, env.clone())?;
-                let r = self.interpret(right, env)?;
+                let l = self.interpret(left.clone(), env.clone())?;
+                let r = self.interpret(right.clone(), env)?;
                 match (l.as_ref(), op, r.as_ref()) {
-                    (_, TokenType::Semicolon, r) => Ok(Rc::new(r.clone())),
+                    (_, TokenType::Semicolon, _) => Ok(r.clone()),
 
                     (Expr::Integer(x), TokenType::Plus, Expr::Integer(y)) => Ok(Rc::new(Expr::Integer(x + y))),
                     (Expr::String(x), TokenType::Plus, Expr::String(y)) => Ok(Rc::new(Expr::String(Rc::new(format!("{}{}", x, y))))),
@@ -780,10 +788,10 @@ impl Interpreter {
                 }
             }
             // literals
-            x => Ok(Rc::new(x.clone())),
+            _ => Ok(program),
         }
     }
-    fn cast_bool(&self, expr: &Expr, env: Rc<RefCell<Environment>>) -> Result<bool, BaseError> {
+    fn cast_bool(&self, expr: Rc<Expr>, env: Rc<RefCell<Environment>>) -> Result<bool, BaseError> {
         let v = self.interpret(expr, env)?;
         match v.as_ref() {
             Expr::Bool(false) => Ok(false),
@@ -809,7 +817,7 @@ fn repl() {
             Ok(tree) => {
                 // println!("{}", tree.to_string());
                 let mut interpreter = Interpreter::new();
-                match interpreter.interpret_program(&tree) {
+                match interpreter.interpret_program(Rc::new(tree)) {
                     Ok(normalized) => println!("{}\n", normalized.to_string()),
                     Err(e) => println!("{}\n", e.to_string())
                 }
@@ -831,7 +839,7 @@ fn execute(source: String) {
             // println!("{}", tree.to_string());
             // dbg!(tree.clone());
             let mut interpreter = Interpreter::new();
-            match interpreter.interpret_program(&tree) {
+            match interpreter.interpret_program(Rc::new(tree)) {
                 Ok(normalized) => println!("{}\n", normalized.to_string()),
                 Err(e) => println!("{}\n", e.to_string())
             }
