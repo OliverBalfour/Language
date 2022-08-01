@@ -238,19 +238,26 @@ impl<'a> TokenStream<'a> {
 
 #[derive(Debug, PartialEq)]
 enum Expr {
+    IfThenElse { cond: Box<Expr>, if_true: Box<Expr>, if_false: Box<Expr> },
     PrefixUnary { op: TokenType, expr: Box<Expr> },
     InfixBinary { left: Box<Expr>, op: TokenType, right: Box<Expr> },
     Integer(i64),
     Bool(bool),
+    Unit, // the expression "x;" resolves to unit (C++ void / Rust unit)
 }
 
 impl ToString for Expr {
     fn to_string(&self) -> String {
         match self {
+            Expr::IfThenElse { cond, if_true, if_false } => match **if_false {
+                Expr::Unit => format!(" if ({}) {{ {} }} ", cond.to_string(), if_true.to_string()),
+                _ => format!(" if ({}) {{ {} }} else {{ {} }} ", cond.to_string(), if_true.to_string(), if_false.to_string()),
+            },
             Expr::PrefixUnary { op, expr } => format!("{}{}", op.to_string(), expr.to_string()),
             Expr::InfixBinary { left, op, right } => format!("({} {} {})", left.to_string(), op.to_string(), right.to_string()),
             Expr::Integer(n) => n.to_string(),
             Expr::Bool(b) => b.to_string(),
+            Expr::Unit => String::from(""),
         }
     }
 }
@@ -280,9 +287,28 @@ impl<'a> Parser<'a> {
         self._pos += 1;
         t
     }
-    // expr ::= equality
+    // expr ::= if (equality) expr | if (equality) expr else expr | equality
     fn expr(&mut self) -> Result<Expr, BaseError> {
-        self.equality()
+        if self.peek() == Some(TokenType::If) {
+            self.consume();
+            if self.consume() != Some(TokenType::LeftParen) {
+                return Err(BaseError::Syntax(String::from("Missing left paren after 'if'")))
+            }
+            let cond = Box::new(self.equality()?);
+            if self.consume() != Some(TokenType::RightParen) {
+                return Err(BaseError::Syntax(String::from("Missing right paren after 'if' condition")))
+            }
+            let if_true = Box::new(self.expr()?);
+            let if_false = Box::new(if self.peek() == Some(TokenType::Else) {
+                self.consume();
+                self.expr()?
+            } else {
+                Expr::Unit
+            });
+            Ok(Expr::IfThenElse { cond, if_true, if_false })
+        } else {
+            self.equality()
+        }
     }
     // equality ::= comparison ( (!= | ==) comparison )*
     fn equality(&mut self) -> Result<Expr, BaseError> {
@@ -382,6 +408,14 @@ struct Interpreter {}
 impl Interpreter {
     fn interpret(&self, program: Expr) -> Result<Expr, BaseError> {
         match program {
+            Expr::IfThenElse { cond, if_true, if_false } => {
+                let b = self.interpret(*cond)?;
+                if self.cast_bool(b)? {
+                    self.interpret(*if_true)
+                } else {
+                    self.interpret(*if_false)
+                }
+            },
             Expr::PrefixUnary { op, expr } => {
                 let v = self.interpret(*expr)?;
                 match (op, v) {
@@ -435,6 +469,15 @@ impl Interpreter {
             x => Ok(x),
         }
     }
+    fn cast_bool(&self, expr: Expr) -> Result<bool, BaseError> {
+        let v = self.interpret(expr)?;
+        match v {
+            Expr::Bool(false) => Ok(false),
+            Expr::Integer(0) => Ok(false),
+            // Expr::String(s) => Ok(s.len() > 0),
+            _ => Ok(true)
+        }
+    }
 }
 
 fn main() {
@@ -450,7 +493,7 @@ fn main() {
         // dbg!(parser.root);
         match parser.root {
             Ok(tree) => {
-                println!("{}", tree.to_string());
+                // println!("{}", tree.to_string());
                 let interpreter = Interpreter {};
                 match interpreter.interpret(tree) {
                     Ok(normalized) => println!("{}\n", normalized.to_string()),

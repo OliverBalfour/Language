@@ -1,0 +1,7 @@
+structs
+enums
+pattern matching
+functions
+static type checker
+for in loop
+while loop
