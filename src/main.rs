@@ -35,6 +35,7 @@ enum TokenType {
     True,
     False,
     Return,
+    Print,
 
     Identifier(Rc<String>),
 
@@ -70,6 +71,7 @@ impl ToString for TokenType {
             Self::True => String::from("true"),
             Self::False => String::from("false"),
             Self::Return => String::from("return"),
+            Self::Print => String::from("print "),
             Self::Identifier(s) => (s as &String).clone(),
             _ => String::from(""),
         }
@@ -227,13 +229,14 @@ impl<'a> TokenStream<'a> {
         }
 
         // reserved words
-        const RESERVED: [(&str, TokenType); 6] = [
+        const RESERVED: [(&str, TokenType); 7] = [
             ("if", TokenType::If),
             ("else", TokenType::Else),
             ("true", TokenType::True),
             ("false", TokenType::False),
             ("while", TokenType::While),
             ("return", TokenType::Return),
+            ("print", TokenType::Print),
         ];
         for (lexeme, token) in RESERVED {
             if self.rest().starts_with(lexeme) {
@@ -322,7 +325,7 @@ impl<'a> Parser<'a> {
         };
         Ok(expr)
     }
-    // expr ::= { stmt } | if (equality) expr | if (equality) expr else expr | while (equality) expr | equality
+    // expr ::= { stmt } | if (equality) expr | if (equality) expr else expr | while (equality) expr | print expr | equality
     fn expr(&mut self) -> Result<Expr, BaseError> {
         if self.peek() == Some(TokenType::LeftCurly) {
             // { stmt }
@@ -365,7 +368,12 @@ impl<'a> Parser<'a> {
             }
             let body = Box::new(self.expr()?);
             Ok(Expr::While { cond, body })
-        } else {
+        } else if self.peek() == Some(TokenType::Print) {
+            // print expr
+            let op = self.consume().unwrap();
+            let expr = Box::new(self.expr()?);
+            Ok(Expr::PrefixUnary { op, expr })
+        }else {
             // equality
             self.equality()
         }
@@ -485,6 +493,12 @@ impl Interpreter {
             Expr::PrefixUnary { op, expr } => {
                 let v = self.interpret(*expr)?;
                 match (op, v) {
+                    (TokenType::Print, Expr::Integer(n)) => { println!("{}", n); Ok(Expr::Unit) },
+                    (TokenType::Print, Expr::String(s)) => { println!("{}", s); Ok(Expr::Unit) },
+                    (TokenType::Print, Expr::Bool(b)) => { println!("{}", b); Ok(Expr::Unit) },
+                    (TokenType::Print, Expr::Unit) => { println!("{}", Expr::Unit.to_string()); Ok(Expr::Unit) },
+                    (TokenType::Print, v) => Err(BaseError::Syntax(format!("Cannot print unexpected value: {}", v.to_string()))),
+
                     (TokenType::Not, Expr::Bool(b)) => Ok(Expr::Bool(!b)),
                     (TokenType::Not, v) => Err(BaseError::Type(format!("Cannot use boolean negation on {}", v.to_string()))),
 
